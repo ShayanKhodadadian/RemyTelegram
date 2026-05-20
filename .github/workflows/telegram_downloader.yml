@@ -127,7 +127,7 @@ jobs:
       # ──────────────────────────────────────
       # قدم چهارم: ساخت اسکریپت دانلودر
       # ──────────────────────────────────────
-            - name: 📝 ساخت اسکریپت دانلودر (روش Embed – بدون نیاز به ربات)
+      - name: 📝 ساخت اسکریپت دانلودر (روش Embed – بدون نیاز به ربات)
         run: |
           cat > telegram_downloader.py << 'EOF'
           #!/usr/bin/env python3
@@ -373,7 +373,7 @@ jobs:
       # ──────────────────────────────────────
       # قدم پنجم: اجرای دانلودر
       # ──────────────────────────────────────
-            - name: 🚀 اجرای دانلودر
+      - name: 🚀 اجرای دانلودر
         run: |
           export TEL_LINKS="${{ github.event.inputs.telegram_links }}"
           export SPLIT_THRESH_MB="${{ github.event.inputs.split_threshold_mb }}"
