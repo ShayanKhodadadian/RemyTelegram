@@ -1,4 +1,4 @@
-name: telegram downloader :)
+name: telegram downloader
 
 on:
   workflow_dispatch:
@@ -122,18 +122,21 @@ jobs:
           sudo apt-get install -y zip unzip python3 python3-pip
 
       - name: 🐍 نصب کتابخانه‌های پایتون
-        run: pip3 install requests
+        run: pip3 install requests beautifulsoup4 playwright
+      
+      - name: 🎭 نصب Playwright و مرورگر Chromium
+        run: playwright install --with-deps chromium
 
       # ──────────────────────────────────────
       # قدم چهارم: ساخت اسکریپت دانلودر
       # ──────────────────────────────────────
-      - name: 📝 ساخت اسکریپت دانلودر (روش Embed – بدون نیاز به ربات)
+      - name: 📝 ساخت اسکریپت دانلودر (مبتنی بر Playwright)
         run: |
-          cat > telegram_downloader.py << 'EOF'
+          cat > telegram_downloader.py << 'PYEOF'
           #!/usr/bin/env python3
           import os, sys, time, json, uuid, re, subprocess
           from pathlib import Path
-          from concurrent.futures import ThreadPoolExecutor, as_completed
+          from playwright.sync_api import sync_playwright
           import requests
 
           def parse_links(raw_text):
@@ -150,69 +153,104 @@ jobs:
                       if 't.me/' in line:
                           links.append('https://' + line.lstrip('/'))
               seen = set()
-              unique = []
+              unique_links = []
               for l in links:
                   if l not in seen:
                       seen.add(l)
-                      unique.append(l)
-              if len(unique) > 1000:
-                  print("⚠️ بیش از 1000 لینک تشخیص داده شد. فقط 1000 لینک اول پردازش می‌شود.")
-                  unique = unique[:1000]
-              print(f"✅ {len(unique)} لینک معتبر شناسایی شد.")
-              return unique
+                      unique_links.append(l)
+              if len(unique_links) > 1000:
+                  print(f"⚠️ بیش از 1000 لینک تشخیص داده شد. فقط 1000 لینک اول پردازش می‌شود.")
+                  unique_links = unique_links[:1000]
+              print(f"✅ {len(unique_links)} لینک معتبر شناسایی شد.")
+              return unique_links
 
-          def fetch_direct_link(telegram_link):
+          def extract_media_from_page(telegram_link):
               """
-              لینک صفحه Embed تلگرام را می‌خواند و لینک مستقیم دانلود + نام فایل را برمی‌گرداند.
+              از Playwright برای باز کردن صفحه embed تلگرام و استخراج لینک مستقیم فایل استفاده می‌کند.
               """
-              # ساخت لینک embed: مثلاً https://t.me/channel/123?embed=1
+              # ساخت لینک embed: https://t.me/channel/123?embed=1
               embed_url = telegram_link.strip()
-              if not embed_url.endswith('?embed=1'):
+              if '?' in embed_url:
+                  base, query = embed_url.split('?', 1)
+                  if 'embed=1' not in query:
+                      embed_url = f"{base}?{query}&embed=1"
+              else:
                   embed_url = embed_url + '?embed=1'
-              
-              headers = {
-                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-              }
-              try:
-                  resp = requests.get(embed_url, headers=headers, timeout=15)
-                  resp.raise_for_status()
-                  html = resp.text
 
-                  # الگوهای رایج برای فایل‌های رسانه‌ای
-                  # ویدیو: <video src="..." ...
-                  video_match = re.search(r'<video[^>]+src="(https://[^"]+)"', html)
-                  if video_match:
-                      url = video_match.group(1)
-                      # نام فایل را از انتهای URL حدس می‌زنیم (اختیاری)
-                      fname = url.split('/')[-1].split('?')[0] or "video.mp4"
-                      return url, fname, None
-
-                  # عکس: <img src="..." ...
-                  photo_match = re.search(r'class="tgme_widget_message_photo_wrap"[^>]*>\s*<img[^>]+src="(https://[^"]+)"', html, re.DOTALL)
-                  if photo_match:
-                      url = photo_match.group(1)
-                      fname = url.split('/')[-1].split('?')[0] or "photo.jpg"
-                      return url, fname, None
-
-                  # فایل سند: <a class="tgme_widget_message_document" href="..." ...>
-                  doc_match = re.search(r'<a\s+class="tgme_widget_message_document"[^>]*href="(https://[^"]+)"', html)
-                  if doc_match:
-                      url = doc_match.group(1)
-                      # تلاش برای گرفتن نام فایل از عنوان
-                      name_match = re.search(r'<div class="tgme_widget_message_document_title"[^>]*>([^<]+)</div>', html)
-                      fname = name_match.group(1).strip() if name_match else "document"
-                      return url, fname, None
-
-                  # صدا: <audio src="..." ...
-                  audio_match = re.search(r'<audio[^>]+src="(https://[^"]+)"', html)
-                  if audio_match:
-                      url = audio_match.group(1)
-                      fname = url.split('/')[-1].split('?')[0] or "audio.mp3"
-                      return url, fname, None
-
-                  return None, None, "هیچ فایل قابل دانلودی در این پست پیدا نشد."
-              except Exception as e:
-                  return None, None, str(e)
+              with sync_playwright() as p:
+                  browser = p.chromium.launch(headless=True, args=[
+                      '--no-sandbox',
+                      '--disable-setuid-sandbox',
+                      '--disable-dev-shm-usage'
+                  ])
+                  context = browser.new_context(
+                      user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+                  )
+                  page = context.new_page()
+                  
+                  try:
+                      print(f"   🌐 باز کردن صفحه embed...")
+                      page.goto(embed_url, wait_until='networkidle', timeout=30000)
+                      
+                      # صبر می‌کنیم تا رسانه‌ها بارگذاری شوند
+                      page.wait_for_timeout(3000)
+                      
+                      # پیدا کردن ویدیو
+                      video = page.query_selector('video')
+                      if video:
+                          src = video.get_attribute('src')
+                          if src:
+                              fname = src.split('/')[-1].split('?')[0] or "video.mp4"
+                              browser.close()
+                              return src, fname, None
+                      
+                      # پیدا کردن عکس
+                      img = page.query_selector('img.tgme_widget_message_photo, img[src*="file/photo"]')
+                      if not img:
+                          img = page.query_selector('img[src*="t.me"]')
+                      if img:
+                          src = img.get_attribute('src')
+                          if src:
+                              fname = src.split('/')[-1].split('?')[0] or "photo.jpg"
+                              browser.close()
+                              return src, fname, None
+                      
+                      # پیدا کردن فایل دانلودی (سند)
+                      doc_link = page.query_selector('a.tgme_widget_message_document')
+                      if doc_link:
+                          href = doc_link.get_attribute('href')
+                          if href:
+                              # اسم فایل را از متن لینک می‌گیریم
+                              title_el = page.query_selector('.tgme_widget_message_document_title')
+                              fname = title_el.inner_text().strip() if title_el else "document"
+                              browser.close()
+                              return href, fname, None
+                      
+                      # پیدا کردن صوت
+                      audio = page.query_selector('audio')
+                      if audio:
+                          src = audio.get_attribute('src')
+                          if src:
+                              fname = src.split('/')[-1].split('?')[0] or "audio.mp3"
+                              browser.close()
+                              return src, fname, None
+                      
+                      # جستجوی هر لینک مستقیم دیگری در صفحه
+                      print(f"   ⚠️ هیچ رسانه‌ای با روش معمول پیدا نشد. در حال بررسی لینک‌های جایگزین...")
+                      all_links = page.query_selector_all('a[href*="t.me"]')
+                      for link in all_links:
+                          href = link.get_attribute('href')
+                          if href and ('/file/' in href or '/video/' in href or '/photo/' in href):
+                              fname = href.split('/')[-1].split('?')[0] or "file"
+                              browser.close()
+                              return href, fname, None
+                      
+                      browser.close()
+                      return None, None, "هیچ فایل قابل دانلودی در این پست پیدا نشد."
+                      
+                  except Exception as e:
+                      browser.close()
+                      return None, None, f"خطای Playwright: {str(e)}"
 
           def download_with_resume(url, dest, max_retries=10, chunk_size=64*1024):
               dest = Path(dest)
@@ -237,11 +275,24 @@ jobs:
                               if chunk:
                                   f.write(chunk)
                                   downloaded += len(chunk)
+                                  if total > 0:
+                                      pct = downloaded / total * 100
+                                      bar = '█' * int(40 * downloaded // total) + '░' * (40 - int(40 * downloaded // total))
+                                      print(f"\rپیشرفت: |{bar}| {pct:.1f}% ({downloaded}/{total} بایت)", end='', flush=True)
+                      print()
                       temp.replace(dest)
                       return True, dest.stat().st_size
-                  except Exception as e:
-                      print(f"⚠️ تلاش {attempt+1} با خطا: {e}")
+                  except (requests.exceptions.ChunkedEncodingError,
+                          requests.exceptions.ConnectionError,
+                          requests.exceptions.Timeout) as e:
+                      print(f"\n⚠️ قطع ارتباط: {e}. تلاش {attempt+1}/{max_retries}")
                       time.sleep(2 ** attempt)
+                  except Exception as e:
+                      print(f"\n❌ خطای مرگبار: {e}")
+                      if temp.exists():
+                          temp.unlink()
+                      return False, 0
+              print("\n❌ تعداد تلاش‌ها به پایان رسید.")
               if temp.exists():
                   temp.unlink()
               return False, 0
@@ -259,7 +310,7 @@ jobs:
 
           def process_one_link(link, base_dir):
               print(f"\n🔗 دریافت اطلاعات {link}")
-              url, fname, err = fetch_direct_link(link)
+              url, fname, err = extract_media_from_page(link)
               if err:
                   print(f"❌ خطا: {err}")
                   return None, 0, err
@@ -298,18 +349,12 @@ jobs:
               base.mkdir(parents=True, exist_ok=True)
 
               results = []
-              with ThreadPoolExecutor(max_workers=2) as executor:
-                  futures = {executor.submit(process_one_link, link, base): link for link in links}
-                  for future in as_completed(futures):
-                      link = futures[future]
-                      try:
-                          dest, size, err = future.result()
-                          if err:
-                              print(f"🔴 لینک ناموفق: {link} ({err})")
-                          else:
-                              results.append((dest, size))
-                      except Exception as e:
-                          print(f"🔴 خطا در پردازش {link}: {e}")
+              for link in links:
+                  dest, size, err = process_one_link(link, base)
+                  if err:
+                      print(f"🔴 لینک ناموفق: {link} ({err})")
+                  else:
+                      results.append((dest, size))
 
               if not results:
                   print("❌ هیچ فایلی با موفقیت دانلود نشد.")
@@ -367,7 +412,7 @@ jobs:
 
           if __name__ == "__main__":
               main()
-          EOF
+          PYEOF
           chmod +x telegram_downloader.py
 
       # ──────────────────────────────────────
