@@ -127,16 +127,14 @@ jobs:
       # ──────────────────────────────────────
       # قدم چهارم: ساخت اسکریپت دانلودر
       # ──────────────────────────────────────
-      - name: 📝 ساخت اسکریپت دانلودر
+            - name: 📝 ساخت اسکریپت دانلودر (روش Embed – بدون نیاز به ربات)
         run: |
           cat > telegram_downloader.py << 'EOF'
           #!/usr/bin/env python3
-          import os, sys, time, json, uuid
+          import os, sys, time, json, uuid, re, subprocess
           from pathlib import Path
           from concurrent.futures import ThreadPoolExecutor, as_completed
           import requests
-          import re
-          import subprocess
 
           def parse_links(raw_text):
               text = raw_text.replace(',', '\n').replace(' ', '\n')
@@ -152,22 +150,76 @@ jobs:
                       if 't.me/' in line:
                           links.append('https://' + line.lstrip('/'))
               seen = set()
-              unique_links = []
+              unique = []
               for l in links:
                   if l not in seen:
                       seen.add(l)
-                      unique_links.append(l)
-              if len(unique_links) > 1000:
-                  print(f"⚠️ بیش از 1000 لینک تشخیص داده شد. فقط 1000 لینک اول پردازش می‌شود.")
-                  unique_links = unique_links[:1000]
-              print(f"✅ {len(unique_links)} لینک معتبر شناسایی شد.")
-              return unique_links
+                      unique.append(l)
+              if len(unique) > 1000:
+                  print("⚠️ بیش از 1000 لینک تشخیص داده شد. فقط 1000 لینک اول پردازش می‌شود.")
+                  unique = unique[:1000]
+              print(f"✅ {len(unique)} لینک معتبر شناسایی شد.")
+              return unique
 
-          def download_with_resume(url, dest, headers, max_retries=10, chunk_size=64*1024):
+          def fetch_direct_link(telegram_link):
+              """
+              لینک صفحه Embed تلگرام را می‌خواند و لینک مستقیم دانلود + نام فایل را برمی‌گرداند.
+              """
+              # ساخت لینک embed: مثلاً https://t.me/channel/123?embed=1
+              embed_url = telegram_link.strip()
+              if not embed_url.endswith('?embed=1'):
+                  embed_url = embed_url + '?embed=1'
+              
+              headers = {
+                  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+              }
+              try:
+                  resp = requests.get(embed_url, headers=headers, timeout=15)
+                  resp.raise_for_status()
+                  html = resp.text
+
+                  # الگوهای رایج برای فایل‌های رسانه‌ای
+                  # ویدیو: <video src="..." ...
+                  video_match = re.search(r'<video[^>]+src="(https://[^"]+)"', html)
+                  if video_match:
+                      url = video_match.group(1)
+                      # نام فایل را از انتهای URL حدس می‌زنیم (اختیاری)
+                      fname = url.split('/')[-1].split('?')[0] or "video.mp4"
+                      return url, fname, None
+
+                  # عکس: <img src="..." ...
+                  photo_match = re.search(r'class="tgme_widget_message_photo_wrap"[^>]*>\s*<img[^>]+src="(https://[^"]+)"', html, re.DOTALL)
+                  if photo_match:
+                      url = photo_match.group(1)
+                      fname = url.split('/')[-1].split('?')[0] or "photo.jpg"
+                      return url, fname, None
+
+                  # فایل سند: <a class="tgme_widget_message_document" href="..." ...>
+                  doc_match = re.search(r'<a\s+class="tgme_widget_message_document"[^>]*href="(https://[^"]+)"', html)
+                  if doc_match:
+                      url = doc_match.group(1)
+                      # تلاش برای گرفتن نام فایل از عنوان
+                      name_match = re.search(r'<div class="tgme_widget_message_document_title"[^>]*>([^<]+)</div>', html)
+                      fname = name_match.group(1).strip() if name_match else "document"
+                      return url, fname, None
+
+                  # صدا: <audio src="..." ...
+                  audio_match = re.search(r'<audio[^>]+src="(https://[^"]+)"', html)
+                  if audio_match:
+                      url = audio_match.group(1)
+                      fname = url.split('/')[-1].split('?')[0] or "audio.mp3"
+                      return url, fname, None
+
+                  return None, None, "هیچ فایل قابل دانلودی در این پست پیدا نشد."
+              except Exception as e:
+                  return None, None, str(e)
+
+          def download_with_resume(url, dest, max_retries=10, chunk_size=64*1024):
               dest = Path(dest)
               dest.parent.mkdir(parents=True, exist_ok=True)
               temp = dest.with_name(f".{uuid.uuid4().hex}.partial")
               downloaded = temp.stat().st_size if temp.exists() else 0
+              headers = {"User-Agent": "Mozilla/5.0"}
               sess = requests.Session()
               sess.headers.update(headers)
 
@@ -185,42 +237,14 @@ jobs:
                               if chunk:
                                   f.write(chunk)
                                   downloaded += len(chunk)
-                                  if total > 0:
-                                      pct = downloaded / total * 100
-                                      bar = '█' * int(40 * downloaded // total) + '░' * (40 - int(40 * downloaded // total))
-                                      print(f"\rپیشرفت: |{bar}| {pct:.1f}% ({downloaded}/{total} بایت)", end='', flush=True)
-                      print()
                       temp.replace(dest)
                       return True, dest.stat().st_size
-                  except (requests.exceptions.ChunkedEncodingError,
-                          requests.exceptions.ConnectionError,
-                          requests.exceptions.Timeout) as e:
-                      print(f"\n⚠️ قطع ارتباط: {e}. تلاش {attempt+1}/{max_retries}")
-                      time.sleep(2 ** attempt)
                   except Exception as e:
-                      print(f"\n❌ خطای مرگبار: {e}")
-                      if temp.exists():
-                          temp.unlink()
-                      return False, 0
-              print("\n❌ تعداد تلاش‌ها به پایان رسید.")
+                      print(f"⚠️ تلاش {attempt+1} با خطا: {e}")
+                      time.sleep(2 ** attempt)
               if temp.exists():
                   temp.unlink()
               return False, 0
-
-          def fetch_direct_link(telegram_link, headers):
-              api = "https://telegramdownloader.net/proxy.php"
-              data = {"telegram_link": telegram_link}
-              try:
-                  resp = requests.post(api, headers=headers, data=data, timeout=15)
-                  resp.raise_for_status()
-                  result = resp.json()
-                  raw_url = result.get('data', {}).get('data', {}).get('link')
-                  file_name = result.get('data', {}).get('data', {}).get('file_name')
-                  if not raw_url or not file_name:
-                      return None, None, "لینک مستقیم یافت نشد"
-                  return raw_url, file_name, None
-              except Exception as e:
-                  return None, None, str(e)
 
           def sanitize_name(name):
               if not name.isascii():
@@ -233,9 +257,9 @@ jobs:
               clean = re.sub(r'__+', '_', clean)
               return clean
 
-          def process_one_link(link, base_dir, session_headers):
+          def process_one_link(link, base_dir):
               print(f"\n🔗 دریافت اطلاعات {link}")
-              url, fname, err = fetch_direct_link(link, session_headers)
+              url, fname, err = fetch_direct_link(link)
               if err:
                   print(f"❌ خطا: {err}")
                   return None, 0, err
@@ -248,7 +272,7 @@ jobs:
                   dest = base_dir / f"{orig_stem}_{counter}{orig_suffix}"
                   counter += 1
               print(f"🚀 شروع دانلود...")
-              success, size = download_with_resume(url, dest, session_headers)
+              success, size = download_with_resume(url, dest)
               if not success:
                   return None, 0, "دانلود ناموفق"
               print(f"✅ دانلود کامل: {dest.name} ({size/1e6:.2f} MB)")
@@ -273,11 +297,9 @@ jobs:
                   base = base / subfolder
               base.mkdir(parents=True, exist_ok=True)
 
-              headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-
               results = []
               with ThreadPoolExecutor(max_workers=2) as executor:
-                  futures = {executor.submit(process_one_link, link, base, headers): link for link in links}
+                  futures = {executor.submit(process_one_link, link, base): link for link in links}
                   for future in as_completed(futures):
                       link = futures[future]
                       try:
@@ -351,7 +373,7 @@ jobs:
       # ──────────────────────────────────────
       # قدم پنجم: اجرای دانلودر
       # ──────────────────────────────────────
-      - name: 🚀 اجرای دانلودر
+            - name: 🚀 اجرای دانلودر
         run: |
           export TEL_LINKS="${{ github.event.inputs.telegram_links }}"
           export SPLIT_THRESH_MB="${{ github.event.inputs.split_threshold_mb }}"
