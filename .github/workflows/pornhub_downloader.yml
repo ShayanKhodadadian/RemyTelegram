@@ -4,153 +4,182 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'URL of the video'
+        description: "URL of the video"
         required: true
         type: string
+
       output_folder:
-        description: 'Folder where the video will be saved'
+        description: "Folder where video will be saved"
         required: false
         type: string
-        default: 'downloads'
+        default: "downloads"
+
       quality:
-        description: 'Video quality (yt-dlp format selector)'
-        required: true
-        type: string
-        default: 'bestvideo[height<=720]+bestaudio/best[ext=mp4]/best'
-      archive_name:
-        description: 'Base name for the RAR archive (if file is split)'
+        description: "yt-dlp format selector"
         required: false
         type: string
-        default: 'video'
+        default: "bestvideo[height<=720]+bestaudio/best[ext=mp4]/best"
+
+      archive_name:
+        description: "RAR archive base name"
+        required: false
+        type: string
+        default: "video"
 
 permissions:
   contents: write
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
-  download-and-maybe-split:
+  download-and-split:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v5
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.11"
 
-      - name: Install yt-dlp, ffmpeg and bc
+      - name: Install dependencies
         run: |
-          pip install -U yt-dlp
-          sudo apt-get update
-          sudo apt-get install -y bc ffmpeg   # <-- ffmpeg اضافه شد
+          set -e
 
-      - name: Download video (retry up to 5 times)
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade yt-dlp
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            ffmpeg \
+            bc \
+            rar \
+            unzip
+
+          yt-dlp --version
+          ffmpeg -version
+
+      - name: Download video with retry
         id: download
         shell: bash
         run: |
+          set -euo pipefail
+
           FOLDER="${{ github.event.inputs.output_folder }}"
+          URL="${{ github.event.inputs.url }}"
+          QUALITY="${{ github.event.inputs.quality }}"
+
           mkdir -p "$FOLDER"
 
+          OUTPUT_FILE="${RUNNER_TEMP}/final_path.txt"
+
           MAX_RETRIES=5
-          RETRY_COUNT=0
           SUCCESS=false
 
-          while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
-            echo "Download attempt $((RETRY_COUNT+1))/$MAX_RETRIES"
+          for ((i=1;i<=MAX_RETRIES;i++))
+          do
+            echo "===================="
+            echo "Attempt: $i/$MAX_RETRIES"
+            echo "===================="
 
-            # فایل موقت برای ذخیره مسیر خروجی نهایی
-            OUTPUT_FILE_LIST="${RUNNER_TEMP}/downloaded_filename.txt"
+            rm -f "$OUTPUT_FILE"
 
-            yt-dlp \
-              --output "./$FOLDER/%(uploader)s - %(title)s - %(id)s.%(ext)s" \
-              --format "${{ github.event.inputs.quality }}" \
-              --merge-output-format mp4 \
-              --retries 3 \
-              --fragment-retries 10 \
-              --no-check-certificate \
-              --geo-bypass \
-              --no-color \
+            if yt-dlp \
+              -v \
               --newline \
-              --print-to-file filename "$OUTPUT_FILE_LIST" \
-              "${{ github.event.inputs.url }}" && {
+              --no-color \
+              --retries 10 \
+              --fragment-retries 10 \
+              --extractor-retries 5 \
+              --merge-output-format mp4 \
+              --geo-bypass \
+              --format "$QUALITY" \
+              --output "./$FOLDER/%(uploader)s - %(title)s - %(id)s.%(ext)s" \
+              --print after_move:filepath \
+              "$URL" > "$OUTPUT_FILE"
+            then
 
-                # خواندن مسیر فایل نهایی از فایل موقت
-                NEW_FILE=$(cat "$OUTPUT_FILE_LIST")
+              NEW_FILE=$(tail -n 1 "$OUTPUT_FILE" | tr -d '\r')
 
-                if [ -n "$NEW_FILE" ] && [ -f "$NEW_FILE" ]; then
-                  echo "Download succeeded: $NEW_FILE"
-                  SUCCESS=true
-                  break
-                else
-                  echo "Download finished but final file not found. Retrying..."
-                fi
-              } || {
-                echo "Download attempt failed"
-              }
+              echo "Detected file:"
+              echo "$NEW_FILE"
 
-            RETRY_COUNT=$((RETRY_COUNT+1))
-
-            if [ $RETRY_COUNT -lt $MAX_RETRIES ]; then
-              sleep 5
+              if [[ -f "$NEW_FILE" ]]; then
+                SUCCESS=true
+                break
+              fi
             fi
+
+            echo "Attempt failed"
+
+            sleep 5
           done
 
-          if [ "$SUCCESS" = false ]; then
-            echo "All download attempts failed"
+          if [[ "$SUCCESS" != true ]]; then
+            echo "Download failed after all retries"
             exit 1
           fi
 
-          FILENAME=$(basename "$NEW_FILE")
-          SIZE_BYTES=$(stat -c %s "$NEW_FILE")
+          FILE_NAME=$(basename "$NEW_FILE")
+          FILE_SIZE=$(stat -c%s "$NEW_FILE")
 
-          echo "filename=$FILENAME" >> $GITHUB_OUTPUT
-          echo "size_bytes=$SIZE_BYTES" >> $GITHUB_OUTPUT
+          echo "filename=$FILE_NAME" >> "$GITHUB_OUTPUT"
+          echo "filepath=$NEW_FILE" >> "$GITHUB_OUTPUT"
+          echo "size_bytes=$FILE_SIZE" >> "$GITHUB_OUTPUT"
 
-      - name: Install RAR
-        run: sudo apt-get install -y rar
+          echo "Final file:"
+          ls -lh "$NEW_FILE"
 
-      - name: Conditional split (if file > 99 MB)
+      - name: Split if larger than 99MB
         id: split
         shell: bash
         run: |
+          set -euo pipefail
+
           FOLDER="${{ github.event.inputs.output_folder }}"
-          FILENAME="${{ steps.download.outputs.filename }}"
-          SIZE_BYTES="${{ steps.download.outputs.size_bytes }}"
-          SIZE_MB=$(echo "scale=2; $SIZE_BYTES / 1048576" | bc)
-          THRESHOLD_MB=99
+          FILE="${{ steps.download.outputs.filename }}"
+          SIZE="${{ steps.download.outputs.size_bytes }}"
+
+          THRESHOLD=103809024
 
           cd "$FOLDER"
 
-          if (( $(echo "$SIZE_MB > $THRESHOLD_MB" | bc -l) )); then
+          if [[ "$SIZE" -gt "$THRESHOLD" ]]
+          then
+              RANDOM_ID=$(openssl rand -hex 3)
 
-            RANDOM_HEX=$(openssl rand -hex 3)
-            ARCHIVE_NAME="${{ github.event.inputs.archive_name }}_${RANDOM_HEX}"
+              ARCHIVE="${{ github.event.inputs.archive_name }}_${RANDOM_ID}"
 
-            rar a -v95m -m5 -ep1 "${ARCHIVE_NAME}.rar" "$FILENAME"
+              rar a \
+                  -v95m \
+                  -m5 \
+                  -ep1 \
+                  "${ARCHIVE}.rar" \
+                  "$FILE"
 
-            rm "$FILENAME"
+              rm -f "$FILE"
 
-            echo "split_done=true" >> $GITHUB_OUTPUT
-            ls -lh "${ARCHIVE_NAME}.part"*.rar
+              echo "split_done=true" >> "$GITHUB_OUTPUT"
 
+              ls -lh
           else
-            echo "split_done=false" >> $GITHUB_OUTPUT
+              echo "split_done=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Commit and push to repository
+      - name: Commit and push
         shell: bash
         run: |
+          set -e
+
           FOLDER="${{ github.event.inputs.output_folder }}"
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git add "$FOLDER/"
+          git add "$FOLDER"
 
-          git commit -m "Add downloaded video(s)" || echo "Nothing to commit"
+          git diff --cached --quiet || \
+          git commit -m "Add downloaded files"
 
           git push
