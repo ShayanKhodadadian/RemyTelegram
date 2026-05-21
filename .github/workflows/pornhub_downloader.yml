@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       url:
-        description: "URL of the video"
+        description: "URL of video"
         required: true
         type: string
 
       output_folder:
-        description: "Folder where video will be saved"
+        description: "Output folder"
         required: false
         type: string
         default: "downloads"
@@ -21,7 +21,7 @@ on:
         default: "bestvideo[height<=720]+bestaudio/best[ext=mp4]/best"
 
       archive_name:
-        description: "RAR archive base name"
+        description: "RAR archive name"
         required: false
         type: string
         default: "video"
@@ -34,13 +34,19 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+
+      - name: Checkout repository
         uses: actions/checkout@v5
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Install dependencies
         run: |
@@ -57,10 +63,25 @@ jobs:
             rar \
             unzip
 
+          echo "Versions:"
           yt-dlp --version
           ffmpeg -version
+          node --version
 
-      - name: Download video with retry
+      - name: Create cookies file
+        shell: bash
+        run: |
+          set -e
+
+          if [ -n "${{ secrets.YTDLP_COOKIES }}" ]; then
+              echo "${{ secrets.YTDLP_COOKIES }}" > cookies.txt
+              echo "Cookies loaded"
+          else
+              echo "No cookies secret found"
+              touch cookies.txt
+          fi
+
+      - name: Download video
         id: download
         shell: bash
         run: |
@@ -72,21 +93,23 @@ jobs:
 
           mkdir -p "$FOLDER"
 
-          OUTPUT_FILE="${RUNNER_TEMP}/final_path.txt"
+          OUTPUT_FILE="${RUNNER_TEMP}/download_result.txt"
 
-          MAX_RETRIES=5
           SUCCESS=false
+          MAX_RETRIES=5
 
           for ((i=1;i<=MAX_RETRIES;i++))
           do
-            echo "===================="
-            echo "Attempt: $i/$MAX_RETRIES"
-            echo "===================="
+
+            echo "=================================="
+            echo "Attempt $i / $MAX_RETRIES"
+            echo "=================================="
 
             rm -f "$OUTPUT_FILE"
 
             if yt-dlp \
               -v \
+              --cookies cookies.txt \
               --newline \
               --no-color \
               --retries 10 \
@@ -102,22 +125,23 @@ jobs:
 
               NEW_FILE=$(tail -n 1 "$OUTPUT_FILE" | tr -d '\r')
 
-              echo "Detected file:"
+              echo "Found file:"
               echo "$NEW_FILE"
 
               if [[ -f "$NEW_FILE" ]]; then
-                SUCCESS=true
-                break
+                  SUCCESS=true
+                  break
               fi
             fi
 
             echo "Attempt failed"
 
             sleep 5
+
           done
 
           if [[ "$SUCCESS" != true ]]; then
-            echo "Download failed after all retries"
+            echo "Download failed after retries"
             exit 1
           fi
 
@@ -128,10 +152,9 @@ jobs:
           echo "filepath=$NEW_FILE" >> "$GITHUB_OUTPUT"
           echo "size_bytes=$FILE_SIZE" >> "$GITHUB_OUTPUT"
 
-          echo "Final file:"
           ls -lh "$NEW_FILE"
 
-      - name: Split if larger than 99MB
+      - name: Split file if larger than 99MB
         id: split
         shell: bash
         run: |
@@ -147,24 +170,29 @@ jobs:
 
           if [[ "$SIZE" -gt "$THRESHOLD" ]]
           then
+
               RANDOM_ID=$(openssl rand -hex 3)
 
               ARCHIVE="${{ github.event.inputs.archive_name }}_${RANDOM_ID}"
 
               rar a \
-                  -v95m \
-                  -m5 \
-                  -ep1 \
-                  "${ARCHIVE}.rar" \
-                  "$FILE"
+                -v95m \
+                -m5 \
+                -ep1 \
+                "${ARCHIVE}.rar" \
+                "$FILE"
 
               rm -f "$FILE"
 
               echo "split_done=true" >> "$GITHUB_OUTPUT"
 
+              echo "Archive parts:"
               ls -lh
+
           else
+
               echo "split_done=false" >> "$GITHUB_OUTPUT"
+
           fi
 
       - name: Commit and push
@@ -179,7 +207,15 @@ jobs:
 
           git add "$FOLDER"
 
-          git diff --cached --quiet || \
-          git commit -m "Add downloaded files"
+          if ! git diff --cached --quiet
+          then
+            git commit -m "Add downloaded files"
+            git push
+          else
+            echo "Nothing to commit"
+          fi
 
-          git push
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f cookies.txt
