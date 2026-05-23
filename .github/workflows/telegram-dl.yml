@@ -1,4 +1,4 @@
-name: Download Telegram File(s)
+name: Download Telegram Files & Archive
 
 on:
   workflow_dispatch:
@@ -28,18 +28,21 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install Chrome
+      - name: Install dependencies (Chrome, zip)
         run: |
+          # Chrome
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
             | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt-get update -q
           sudo apt-get install -y google-chrome-stable
+          # zip utility
+          sudo apt-get install -y zip
 
       - name: Install npm packages
         run: npm install puppeteer-core puppeteer-extra puppeteer-extra-plugin-stealth
 
-      - name: Create download script
+      - name: Create download & archive script
         run: |
           cat > download.js << 'EOF'
           const puppeteer = require("puppeteer-extra");
@@ -79,9 +82,7 @@ jobs:
             const urlObj = new URL(downloadURL);
             const mod = urlObj.protocol === "https:" ? https : http;
 
-            const cookieHeader = cookies
-              .map(c => `${c.name}=${c.value}`)
-              .join("; ");
+            const cookieHeader = cookies.map(c => `${c.name}=${c.value}`).join("; ");
 
             const options = {
               method: "GET",
@@ -105,10 +106,7 @@ jobs:
                 }
                 const fileStream = fs.createWriteStream(destination);
                 res.pipe(fileStream);
-                fileStream.on("finish", () => {
-                  fileStream.close();
-                  resolve();
-                });
+                fileStream.on("finish", () => { fileStream.close(); resolve(); });
                 fileStream.on("error", reject);
                 res.on("error", reject);
               });
@@ -123,20 +121,110 @@ jobs:
             return { channel: match[1], messageId: parseInt(match[2], 10) };
           }
 
+          /**
+           * Create a zip archive (with optional splitting) and a README.md
+           * for a downloaded file. Everything is placed inside a subfolder
+           * of the main output directory.
+           */
+          function packageFile(rawFilePath, outputBaseDir, repoInfo) {
+            const { owner, repo, branch } = repoInfo;
+            const fileSize = fs.statSync(rawFilePath).size;
+            const originalName = path.basename(rawFilePath);
+            // Folder name = original filename without extension (unique per message)
+            const ext = path.extname(originalName);
+            const folderName = originalName.slice(0, -ext.length) || originalName;
+
+            const folderPath = path.join(outputBaseDir, folderName);
+            if (!fs.existsSync(folderPath)) fs.mkdirSync(folderPath, { recursive: true });
+
+            const archiveBase = path.join(folderPath, folderName); // without extension, zip will add .zip
+            const SPLIT_THRESHOLD_MB = 95;
+            const SPLIT_THRESHOLD_BYTES = SPLIT_THRESHOLD_MB * 1024 * 1024;
+
+            // Build zip command
+            let cmd;
+            if (fileSize > SPLIT_THRESHOLD_BYTES) {
+              console.log(`  File > ${SPLIT_THRESHOLD_MB} MB — creating split archive.`);
+              cmd = `zip -j -s ${SPLIT_THRESHOLD_MB}m "${archiveBase}.zip" "${rawFilePath}"`;
+            } else {
+              cmd = `zip -j "${archiveBase}.zip" "${rawFilePath}"`;
+            }
+            execSync(cmd, { stdio: 'pipe' });
+
+            // Remove the raw file
+            fs.unlinkSync(rawFilePath);
+
+            // Gather all parts
+            const partFiles = fs.readdirSync(folderPath)
+              .filter(f => f.endsWith('.zip') || f.match(/\.z\d{2,3}$/))
+              .sort();
+
+            // Generate README
+            const partsCount = partFiles.length;
+            let totalSize = 0;
+            let downloadLinksMD = "";
+            let idx = 0;
+            for (const part of partFiles) {
+              const partPath = path.join(folderPath, part);
+              const pSize = fs.statSync(partPath).size;
+              totalSize += pSize;
+              idx++;
+              const encodedFolder = encodeURIComponent(folderName);
+              const encodedPart = encodeURIComponent(part);
+              const rawUrl = `https://github.com/${owner}/${repo}/raw/${branch}/Downloads/${encodedFolder}/${encodedPart}`;
+              downloadLinksMD += `| ${idx} | \`${part}\` | [Download](${rawUrl}) |\n`;
+            }
+
+            const totalSizeMB = (totalSize / (1024 * 1024)).toFixed(2);
+            const readmeContent = [
+              `# ${folderName}`,
+              ``,
+              `---`,
+              ``,
+              `## Download Information`,
+              ``,
+              `| Property | Value |`,
+              `|----------|-------|`,
+              `| **Original File** | \`${originalName}\` |`,
+              partsCount > 1
+                ? `| **Total Size** | **${partsCount} parts** – **${totalSizeMB} MB** |`
+                : `| **Size** | ${totalSizeMB} MB |`,
+              `| **Status** | **Complete (100%)** |`,
+              ``,
+              `---`,
+              ``,
+              `## Download Links`,
+              ``,
+              `| # | File | Link |`,
+              `|---|------|------|`,
+              downloadLinksMD.trimEnd(),
+              ``,
+              `---`,
+              ``,
+              `## How to Extract`,
+              ``,
+              `1. **Download all parts** (if split) – parts are \`.zip\`, \`.z01\`, \`.z02\`...`,
+              `2. **Open** \`${folderName}.zip\` with WinRAR, 7-Zip, Ark, or any standard zip tool`,
+              `3. **Extract** – all parts combine automatically`,
+              ``,
+              `---`,
+              ``,
+              `*Created by [avasam.ir](https://avasam.ir) Telegram Downloader*`
+            ].join('\n');
+
+            fs.writeFileSync(path.join(folderPath, 'README.md'), readmeContent, 'utf8');
+            console.log(`  ✓ Archive created in: ${folderPath}`);
+          }
+
           // ─── Core download logic for one link ─────────────────────────────────────
 
-          /**
-           * Download a single Telegram file using the given link.
-           * Returns the absolute path of the saved file, or null if failed.
-           */
-          async function processOneLink(link, browser, UA, downloadsDir) {
+          async function processOneLink(link, browser, UA, downloadsDir, repoInfo) {
             console.log(`\n--- Processing: ${link} ---`);
+            let page1, page2;
             try {
-              // Create two fresh pages
-              const page1 = await browser.newPage();
-              const page2 = await browser.newPage();
+              page1 = await browser.newPage();
+              page2 = await browser.newPage();
 
-              // Setup helpers
               async function setupPage(pg) {
                 await pg.setUserAgent(UA);
                 await pg.setViewport({ width: 1366, height: 768 });
@@ -149,18 +237,14 @@ jobs:
               await setupPage(page1);
               await setupPage(page2);
 
-              // ── Step 1‑3: Get intermediate URL ──────────────────────────────────
+              // Step 1‑3: Get intermediate URL
               await page1.goto("https://telegramdownloader.net/", {
-                waitUntil: "domcontentloaded",
-                timeout: 90000
+                waitUntil: "domcontentloaded", timeout: 90000
               });
               await sleep(4000);
-
               await page1.waitForSelector("#ts-telegram-link", { timeout: 30000 });
               await page1.evaluate(() => (document.querySelector("#ts-telegram-link").value = ""));
               await page1.type("#ts-telegram-link", link, { delay: 60 });
-              console.log("  ✓ Link entered");
-
               await page1.waitForSelector("#ts-download-btn", { timeout: 15000 });
               await page1.click("#ts-download-btn");
 
@@ -170,20 +254,15 @@ jobs:
                   const btn = document.querySelector(".ts-download-link-button:not(#download-btn)");
                   return btn && btn.href ? btn.href : null;
                 },
-                "Get Direct Download Link href",
-                1000,
-                60000
+                "Get Direct Download Link href", 1000, 60000
               );
-
               await page1.close();
 
-              // ── Step 4‑5: Get final download URL ───────────────────────────────
+              // Step 4‑5: Get final download URL
               await page2.goto(intermediateURL, {
-                waitUntil: "domcontentloaded",
-                timeout: 60000
+                waitUntil: "domcontentloaded", timeout: 60000
               });
               await sleep(2000);
-
               const downloadURL = await pollPage(
                 page2,
                 () => {
@@ -192,35 +271,35 @@ jobs:
                   const h = btn.getAttribute("href") || "";
                   return h.startsWith("http") ? h : null;
                 },
-                "#download-btn href",
-                1000,
-                90000
+                "#download-btn href", 1000, 90000
               );
 
-              // ── Step 6: Direct download ──────────────────────────────────────
+              // Step 6: Direct download
               const cookies = await page2.cookies();
               const urlObj = new URL(downloadURL);
               let originalName = path.basename(urlObj.pathname);
               originalName = decodeURIComponent(originalName).replace(/[^a-zA-Z0-9._-]/g, "_") || "file";
-
-              // Prefix with message ID to avoid name collisions
               const { messageId } = parseTelegramLink(link);
               const filename = `${messageId}_${originalName}`;
-              const destPath = path.join(downloadsDir, filename);
+              const rawDestPath = path.join(downloadsDir, filename); // temporary raw file
 
-              await directDownload(downloadURL, destPath, cookies, UA, intermediateURL);
-
-              const stat = fs.statSync(destPath);
+              await directDownload(downloadURL, rawDestPath, cookies, UA, intermediateURL);
+              const stat = fs.statSync(rawDestPath);
               if (stat.size === 0) throw new Error("Downloaded file is empty.");
+              console.log(`  ✓ Raw file saved: ${filename} (${(stat.size/1024/1024).toFixed(2)} MB)`);
 
-              console.log(`  ✓ Downloaded: ${filename} (${(stat.size/1024/1024).toFixed(2)} MB)`);
+              // Package into folder + zip + README
+              packageFile(rawDestPath, downloadsDir, repoInfo);
 
               await page2.close();
-              return destPath;
+              return true; // success
 
             } catch (err) {
               console.error(`  ✗ Failed for ${link}:`, err.message);
-              return null;
+              // Cleanup open pages
+              try { if (page1) await page1.close(); } catch (_) {}
+              try { if (page2) await page2.close(); } catch (_) {}
+              return false;
             }
           }
 
@@ -228,8 +307,7 @@ jobs:
 
           (async () => {
             const args = process.argv.slice(2);
-            const mode = args[0]; // "--single" or "--range"
-
+            const mode = args[0];
             if (!mode || (mode !== "--single" && mode !== "--range")) {
               console.error("Usage: node download.js --single <link>   OR   --range <start_link> <end_link>");
               process.exit(1);
@@ -237,6 +315,12 @@ jobs:
 
             const downloadsDir = path.resolve("Downloads");
             if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir, { recursive: true });
+
+            // Repo info for README links (from environment)
+            const repoOwner = process.env.REPO_OWNER || "unknown";
+            const repoName = process.env.REPO_NAME || "unknown";
+            const branch = process.env.BRANCH || "main";
+            const repoInfo = { owner: repoOwner, repo: repoName, branch: branch };
 
             const browser = await puppeteer.launch({
               headless: true,
@@ -250,49 +334,41 @@ jobs:
               ]
             });
 
-            const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-                       "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+            const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
             try {
               if (mode === "--single") {
                 const link = args[1];
                 if (!link) throw new Error("No link provided for single mode.");
-                const result = await processOneLink(link, browser, UA, downloadsDir);
-                if (!result) {
-                  console.error("\n✗ Single download failed.");
-                  process.exit(1);
-                }
+                const ok = await processOneLink(link, browser, UA, downloadsDir, repoInfo);
+                if (!ok) process.exit(1);
                 console.log("\n══════════════════════════════════════════");
                 console.log(" All done! ✓");
-                console.log("══════════════════════════════════════════\n");
-              } else { // --range
+                console.log("══════════════════════════════════════════");
+              } else {
                 const startLink = args[1];
                 const endLink = args[2];
-                if (!startLink || !endLink) throw new Error("Both start and end links required for range mode.");
+                if (!startLink || !endLink) throw new Error("Both start and end links required.");
 
                 const start = parseTelegramLink(startLink);
                 const end = parseTelegramLink(endLink);
-                if (start.channel !== end.channel) {
+                if (start.channel !== end.channel)
                   throw new Error("Start and end links must be from the same channel.");
-                }
 
                 const minId = Math.min(start.messageId, end.messageId);
                 const maxId = Math.max(start.messageId, end.messageId);
 
                 console.log(`\n--- Range download: ${start.channel} messages ${minId} → ${maxId} ---`);
-
-                let successCount = 0;
+                let success = 0;
                 for (let id = minId; id <= maxId; id++) {
                   const link = `https://t.me/${start.channel}/${id}`;
-                  const path = await processOneLink(link, browser, UA, downloadsDir);
-                  if (path) successCount++;
-                  // Small pause between requests to be polite
-                  await sleep(2000);
+                  const ok = await processOneLink(link, browser, UA, downloadsDir, repoInfo);
+                  if (ok) success++;
+                  await sleep(2000); // polite pause
                 }
-
                 console.log(`\n══════════════════════════════════════════`);
-                console.log(` Range complete: ${successCount} of ${maxId - minId + 1} files downloaded.`);
-                console.log(`══════════════════════════════════════════\n`);
+                console.log(` Range complete: ${success} of ${maxId - minId + 1} files downloaded.`);
+                console.log(`══════════════════════════════════════════`);
               }
             } catch (err) {
               console.error("\n✗ Fatal error:", err.message);
@@ -309,6 +385,9 @@ jobs:
           SINGLE_LINK: ${{ github.event.inputs.telegram_link }}
           START_LINK: ${{ github.event.inputs.start_link }}
           END_LINK: ${{ github.event.inputs.end_link }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          BRANCH: ${{ github.ref_name }}
         run: |
           if [ -n "$START_LINK" ] && [ -n "$END_LINK" ]; then
             echo "Mode: range"
@@ -331,7 +410,7 @@ jobs:
             if git diff --cached --quiet; then
               echo "Nothing new to commit."
             else
-              git commit -m "Add downloaded Telegram file(s)"
+              git commit -m "Add downloaded Telegram file(s) (archived per file)"
               git push
             fi
           else
