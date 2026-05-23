@@ -30,9 +30,6 @@ jobs:
       - name: Install Python dependencies
         run: pip install beautifulsoup4 requests
 
-      - name: Install Chromium browser for Playwright
-        run: python -m playwright install chromium --with-deps
-
       - name: Scrape Telegram channel (HTTP)
         id: scrape
         env:
