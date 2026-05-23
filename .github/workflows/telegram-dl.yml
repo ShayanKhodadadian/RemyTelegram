@@ -41,6 +41,8 @@ jobs:
           const fs   = require("fs");
           const path = require("path");
           const { execSync } = require("child_process");
+          const https = require("https");
+          const http = require("http");
 
           puppeteer.use(StealthPlugin());
 
@@ -68,27 +70,52 @@ jobs:
             throw new Error(`Timed out waiting for: ${desc}`);
           }
 
-          // Wait for a fully-written (non-.crdownload) new file to appear in dir
-          async function waitForDownload(dir, snapshot, timeoutMs = 180000) {
-            console.log("Waiting for downloaded file to appear in Downloads/ ...");
-            const deadline = Date.now() + timeoutMs;
-            while (Date.now() < deadline) {
-              const current = fs.readdirSync(dir);
-              const newFile = current.find(
-                f => !snapshot.includes(f) && !f.endsWith(".crdownload") && !f.endsWith(".tmp")
-              );
-              if (newFile) {
-                // Give it one extra second to finish writing
-                await sleep(1500);
-                const size = fs.statSync(path.join(dir, newFile)).size;
-                if (size > 0) {
-                  console.log(`  ✓ File ready: ${newFile} (${(size/1024/1024).toFixed(2)} MB)`);
-                  return newFile;
+          /**
+           * Directly download a file using Node's http/https, with session cookies
+           * and referer from the current browser context.
+           * Handles one level of redirect (can be extended).
+           */
+          async function directDownload(downloadURL, destination, cookies, userAgent, referer) {
+            const urlObj = new URL(downloadURL);
+            const mod = urlObj.protocol === "https:" ? https : http;
+
+            const cookieHeader = cookies
+              .map(c => `${c.name}=${c.value}`)
+              .join("; ");
+
+            const options = {
+              method: "GET",
+              headers: {
+                "User-Agent": userAgent,
+                "Referer": referer,
+                "Cookie": cookieHeader,
+                "Accept": "*/*",
+              },
+            };
+
+            return new Promise((resolve, reject) => {
+              const req = mod.get(urlObj.href, options, (res) => {
+                if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                  // Follow redirect (resolve with the final download)
+                  return directDownload(res.headers.location, destination, cookies, userAgent, referer)
+                    .then(resolve)
+                    .catch(reject);
                 }
-              }
-              await sleep(1000);
-            }
-            throw new Error("Timed out waiting for downloaded file.");
+                if (res.statusCode !== 200) {
+                  return reject(new Error(`Download failed with status ${res.statusCode}`));
+                }
+                const fileStream = fs.createWriteStream(destination);
+                res.pipe(fileStream);
+                fileStream.on("finish", () => {
+                  fileStream.close();
+                  resolve();
+                });
+                fileStream.on("error", reject);
+                res.on("error", reject);
+              });
+              req.on("error", reject);
+              req.end();
+            });
           }
 
           // ─── Main ────────────────────────────────────────────────────────────────
@@ -159,9 +186,6 @@ jobs:
 
               // ══════════════════════════════════════════════════════════════════
               // STEP 3 — Wait for "Get Direct Download Link" button to appear
-              //          NOTE: Both stage-1 and stage-2 buttons share the class
-              //          .ts-download-link-button, but only the stage-2 one has
-              //          id="download-btn". We want the one WITHOUT that id here.
               // ══════════════════════════════════════════════════════════════════
               console.log("\n[Step 3] Waiting for 'Get Direct Download Link' ...");
               let intermediateURL;
@@ -169,7 +193,6 @@ jobs:
                 intermediateURL = await pollPage(
                   page1,
                   () => {
-                    // Select the link button that is NOT the final #download-btn
                     const btn = document.querySelector(
                       ".ts-download-link-button:not(#download-btn)"
                     );
@@ -186,19 +209,12 @@ jobs:
 
               // ══════════════════════════════════════════════════════════════════
               // STEP 4 — Navigate to the intermediate page (new tab simulation)
-              //          This is the "Your Download is Ready" page with the timer
               // ══════════════════════════════════════════════════════════════════
               console.log("\n[Step 4] Opening download page:", intermediateURL);
               const page2 = await browser.newPage();
               await setupPage(page2);
 
-              // Enable Chrome native downloads to our Downloads folder
-              const cdp = await page2.createCDPSession();
-              await cdp.send("Page.setDownloadBehavior", {
-                behavior: "allow",
-                downloadPath: downloadsDir
-              });
-
+              // We no longer need CDP for downloads because we will use direct Node.js download
               await page2.goto(intermediateURL, {
                 waitUntil: "domcontentloaded",
                 timeout: 60000
@@ -206,8 +222,7 @@ jobs:
               await sleep(2000);
 
               // ══════════════════════════════════════════════════════════════════
-              // STEP 5 — Wait for the 10-second countdown to finish.
-              //          Poll until #download-btn has a real https:// href.
+              // STEP 5 — Wait for the countdown and extract the final download URL
               // ══════════════════════════════════════════════════════════════════
               console.log("\n[Step 5] Waiting for countdown + Download File button ...");
               let downloadURL;
@@ -222,7 +237,7 @@ jobs:
                   },
                   "#download-btn href",
                   1000,
-                  90000  // up to 90 s — covers any countdown length
+                  90000
                 );
               } catch (e) {
                 await screenshot(page2, downloadsDir, "debug_step5.png");
@@ -230,71 +245,55 @@ jobs:
               }
 
               // ══════════════════════════════════════════════════════════════════
-              // STEP 6 — Click "Download File" and let Chrome download natively
+              // STEP 6 — Directly download the file using Node.js (with cookies)
+              //           This avoids button‑click issues and browser‑download hangs.
               // ══════════════════════════════════════════════════════════════════
-              console.log("\n[Step 6] Clicking Download File button ...");
-              const snapshot = fs.readdirSync(downloadsDir);
+              console.log("\n[Step 6] Downloading file directly via Node.js ...");
 
-              // Try normal click first
-              let clicked = false;
+              // Gather session cookies from the intermediate page
+              const cookies = await page2.cookies();
+
+              // Determine a clean filename from the download URL
+              const urlObj = new URL(downloadURL);
+              let rawFilename = path.basename(urlObj.pathname);   // e.g. "Grammatik-A2.pdf"
+              // Decode any percent-encoding (unlikely but safe)
+              rawFilename = decodeURIComponent(rawFilename);
+              // Sanitize: keep only safe characters
+              const filename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, "_") || "download";
+              const destPath = path.join(downloadsDir, filename);
+
               try {
-                await page2.click("#download-btn");
-                clicked = true;
-                console.log("  ✓ Clicked via Puppeteer");
-              } catch (clickErr) {
-                console.log("  Puppeteer click failed:", clickErr.message);
+                await directDownload(
+                  downloadURL,
+                  destPath,
+                  cookies,
+                  UA,
+                  intermediateURL   // referer = the page where the button appeared
+                );
+              } catch (err) {
+                await screenshot(page2, downloadsDir, "debug_download.png");
+                throw new Error("Direct download failed: " + err.message);
               }
 
-              // If normal click failed, force-click via page.evaluate (bypasses visibility checks)
-              if (!clicked) {
-                try {
-                  console.log("  Attempting DOM click via evaluate ...");
-                  await page2.evaluate(() => {
-                    const btn = document.querySelector("#download-btn");
-                    if (btn) btn.click();
-                  });
-                  clicked = true;
-                  console.log("  ✓ Clicked via DOM");
-                } catch (evalErr) {
-                  console.log("  DOM click failed:", evalErr.message);
-                }
+              // Verify the file is complete
+              const fileStat = fs.statSync(destPath);
+              if (fileStat.size === 0) {
+                throw new Error("Downloaded file is empty.");
               }
-
-              // Last resort: navigate to download URL without waiting for page load
-              // (since it's a file download, not a page navigation)
-              if (!clicked) {
-                console.log("  Navigating to download URL directly (no wait) ...");
-                await page2.evaluate((url) => { window.location.href = url; }, downloadURL);
-                await sleep(2000); // Give it a moment to trigger
-              }
+              console.log(`  ✓ Downloaded: ${filename} (${(fileStat.size/1024/1024).toFixed(2)} MB)`);
 
               // ══════════════════════════════════════════════════════════════════
-              // STEP 7 — Wait for the file to fully land in Downloads/
-              // ══════════════════════════════════════════════════════════════════
-              console.log("\n[Step 7] Waiting for download to complete ...");
-              let filename;
-              try {
-                filename = await waitForDownload(downloadsDir, snapshot, 180000);
-              } catch (e) {
-                await screenshot(page2, downloadsDir, "debug_step7.png");
-                throw e;
-              }
-
-              const filePath = path.join(downloadsDir, filename);
-              const fileSize = fs.statSync(filePath).size;
-
-              // ══════════════════════════════════════════════════════════════════
-              // STEP 8 — Split if > 45 MB, otherwise leave as-is
+              // STEP 7 — Split if > 45 MB, otherwise leave as-is
               // ══════════════════════════════════════════════════════════════════
               const LIMIT = 45 * 1024 * 1024;
-              if (fileSize > LIMIT) {
-                console.log(`\n[Step 8] File is ${(fileSize/1024/1024).toFixed(2)} MB — splitting into 45 MB parts ...`);
-                execSync(`split -b 45M -d "${filePath}" "${filePath}.part_"`);
-                fs.unlinkSync(filePath);
+              if (fileStat.size > LIMIT) {
+                console.log(`\n[Step 7] File is ${(fileStat.size/1024/1024).toFixed(2)} MB — splitting into 45 MB parts ...`);
+                execSync(`split -b 45M -d "${destPath}" "${destPath}.part_"`);
+                fs.unlinkSync(destPath);
                 const parts = fs.readdirSync(downloadsDir).filter(f => f.startsWith(filename + ".part_"));
                 console.log(`  ✓ Split into ${parts.length} parts:`, parts.join(", "));
               } else {
-                console.log(`\n[Step 8] File is ${(fileSize/1024/1024).toFixed(2)} MB — no split needed.`);
+                console.log(`\n[Step 7] File is ${(fileStat.size/1024/1024).toFixed(2)} MB — no split needed.`);
               }
 
               console.log("\n══════════════════════════════════════════");
@@ -303,7 +302,6 @@ jobs:
 
             } catch (err) {
               console.error("\n✗ Fatal error:", err.message);
-              // Capture screenshot from the most recently active page
               try {
                 const pages = await browser.pages();
                 const last = pages[pages.length - 1];
