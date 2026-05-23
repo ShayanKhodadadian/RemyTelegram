@@ -1,11 +1,17 @@
-name: Download Telegram File and Split
+name: Download Telegram File(s)
 
 on:
   workflow_dispatch:
     inputs:
       telegram_link:
-        description: "Telegram public link (e.g. https://t.me/channelname/123)"
-        required: true
+        description: "Single Telegram public link (e.g. https://t.me/channelname/123). Leave empty if using range."
+        required: false
+      start_link:
+        description: "Start link for range download (e.g. https://t.me/channelname/2994). Must be same channel as end link."
+        required: false
+      end_link:
+        description: "End link for range download (e.g. https://t.me/channelname/3000). Must be same channel as start link."
+        required: false
 
 jobs:
   download:
@@ -56,7 +62,6 @@ jobs:
             console.log(`Screenshot saved: ${p}`);
           }
 
-          // Poll page.evaluate(fn) every intervalMs until it returns truthy, or throw on timeout
           async function pollPage(page, fn, desc, intervalMs = 1000, timeoutMs = 60000) {
             console.log(`Polling: ${desc} ...`);
             const deadline = Date.now() + timeoutMs;
@@ -70,11 +75,6 @@ jobs:
             throw new Error(`Timed out waiting for: ${desc}`);
           }
 
-          /**
-           * Directly download a file using Node's http/https, with session cookies
-           * and referer from the current browser context.
-           * Handles one level of redirect (can be extended).
-           */
           async function directDownload(downloadURL, destination, cookies, userAgent, referer) {
             const urlObj = new URL(downloadURL);
             const mod = urlObj.protocol === "https:" ? https : http;
@@ -96,7 +96,6 @@ jobs:
             return new Promise((resolve, reject) => {
               const req = mod.get(urlObj.href, options, (res) => {
                 if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-                  // Follow redirect (resolve with the final download)
                   return directDownload(res.headers.location, destination, cookies, userAgent, referer)
                     .then(resolve)
                     .catch(reject);
@@ -118,19 +117,126 @@ jobs:
             });
           }
 
+          function parseTelegramLink(link) {
+            const match = link.match(/^https?:\/\/t\.me\/([^\/]+)\/(\d+)$/);
+            if (!match) throw new Error(`Invalid Telegram link: ${link}`);
+            return { channel: match[1], messageId: parseInt(match[2], 10) };
+          }
+
+          // ─── Core download logic for one link ─────────────────────────────────────
+
+          /**
+           * Download a single Telegram file using the given link.
+           * Returns the absolute path of the saved file, or null if failed.
+           */
+          async function processOneLink(link, browser, UA, downloadsDir) {
+            console.log(`\n--- Processing: ${link} ---`);
+            try {
+              // Create two fresh pages
+              const page1 = await browser.newPage();
+              const page2 = await browser.newPage();
+
+              // Setup helpers
+              async function setupPage(pg) {
+                await pg.setUserAgent(UA);
+                await pg.setViewport({ width: 1366, height: 768 });
+                pg.setDefaultTimeout(90000);
+                await pg.evaluateOnNewDocument(() => {
+                  Object.defineProperty(navigator, "webdriver", { get: () => false });
+                });
+              }
+
+              await setupPage(page1);
+              await setupPage(page2);
+
+              // ── Step 1‑3: Get intermediate URL ──────────────────────────────────
+              await page1.goto("https://telegramdownloader.net/", {
+                waitUntil: "domcontentloaded",
+                timeout: 90000
+              });
+              await sleep(4000);
+
+              await page1.waitForSelector("#ts-telegram-link", { timeout: 30000 });
+              await page1.evaluate(() => (document.querySelector("#ts-telegram-link").value = ""));
+              await page1.type("#ts-telegram-link", link, { delay: 60 });
+              console.log("  ✓ Link entered");
+
+              await page1.waitForSelector("#ts-download-btn", { timeout: 15000 });
+              await page1.click("#ts-download-btn");
+
+              const intermediateURL = await pollPage(
+                page1,
+                () => {
+                  const btn = document.querySelector(".ts-download-link-button:not(#download-btn)");
+                  return btn && btn.href ? btn.href : null;
+                },
+                "Get Direct Download Link href",
+                1000,
+                60000
+              );
+
+              await page1.close();
+
+              // ── Step 4‑5: Get final download URL ───────────────────────────────
+              await page2.goto(intermediateURL, {
+                waitUntil: "domcontentloaded",
+                timeout: 60000
+              });
+              await sleep(2000);
+
+              const downloadURL = await pollPage(
+                page2,
+                () => {
+                  const btn = document.querySelector("#download-btn");
+                  if (!btn) return null;
+                  const h = btn.getAttribute("href") || "";
+                  return h.startsWith("http") ? h : null;
+                },
+                "#download-btn href",
+                1000,
+                90000
+              );
+
+              // ── Step 6: Direct download ──────────────────────────────────────
+              const cookies = await page2.cookies();
+              const urlObj = new URL(downloadURL);
+              let originalName = path.basename(urlObj.pathname);
+              originalName = decodeURIComponent(originalName).replace(/[^a-zA-Z0-9._-]/g, "_") || "file";
+
+              // Prefix with message ID to avoid name collisions
+              const { messageId } = parseTelegramLink(link);
+              const filename = `${messageId}_${originalName}`;
+              const destPath = path.join(downloadsDir, filename);
+
+              await directDownload(downloadURL, destPath, cookies, UA, intermediateURL);
+
+              const stat = fs.statSync(destPath);
+              if (stat.size === 0) throw new Error("Downloaded file is empty.");
+
+              console.log(`  ✓ Downloaded: ${filename} (${(stat.size/1024/1024).toFixed(2)} MB)`);
+
+              await page2.close();
+              return destPath;
+
+            } catch (err) {
+              console.error(`  ✗ Failed for ${link}:`, err.message);
+              return null;
+            }
+          }
+
           // ─── Main ────────────────────────────────────────────────────────────────
 
           (async () => {
-            const telegramLink = process.argv[2];
-            if (!telegramLink) throw new Error("Usage: node download.js <telegram_link>");
+            const args = process.argv.slice(2);
+            const mode = args[0]; // "--single" or "--range"
+
+            if (!mode || (mode !== "--single" && mode !== "--range")) {
+              console.error("Usage: node download.js --single <link>   OR   --range <start_link> <end_link>");
+              process.exit(1);
+            }
 
             const downloadsDir = path.resolve("Downloads");
             if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir, { recursive: true });
-
-            console.log("\n══════════════════════════════════════════");
-            console.log(" Telegram Downloader");
-            console.log("══════════════════════════════════════════");
-            console.log("Link:", telegramLink);
 
             const browser = await puppeteer.launch({
               headless: true,
@@ -147,166 +253,49 @@ jobs:
             const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
                        "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
 
-            // Helper: set up a page with stealth UA and viewport
-            async function setupPage(pg) {
-              await pg.setUserAgent(UA);
-              await pg.setViewport({ width: 1366, height: 768 });
-              pg.setDefaultTimeout(90000);
-              await pg.evaluateOnNewDocument(() => {
-                Object.defineProperty(navigator, "webdriver", { get: () => false });
-              });
-            }
-
             try {
-              // ══════════════════════════════════════════════════════════════════
-              // STEP 1 — Open the site and enter the Telegram link
-              // ══════════════════════════════════════════════════════════════════
-              console.log("\n[Step 1] Opening telegramdownloader.net ...");
-              const page1 = await browser.newPage();
-              await setupPage(page1);
+              if (mode === "--single") {
+                const link = args[1];
+                if (!link) throw new Error("No link provided for single mode.");
+                const result = await processOneLink(link, browser, UA, downloadsDir);
+                if (!result) {
+                  console.error("\n✗ Single download failed.");
+                  process.exit(1);
+                }
+                console.log("\n══════════════════════════════════════════");
+                console.log(" All done! ✓");
+                console.log("══════════════════════════════════════════\n");
+              } else { // --range
+                const startLink = args[1];
+                const endLink = args[2];
+                if (!startLink || !endLink) throw new Error("Both start and end links required for range mode.");
 
-              await page1.goto("https://telegramdownloader.net/", {
-                waitUntil: "domcontentloaded",
-                timeout: 90000
-              });
-              await sleep(4000); // Let JS finish rendering
+                const start = parseTelegramLink(startLink);
+                const end = parseTelegramLink(endLink);
+                if (start.channel !== end.channel) {
+                  throw new Error("Start and end links must be from the same channel.");
+                }
 
-              // Type into #ts-telegram-link
-              await page1.waitForSelector("#ts-telegram-link", { timeout: 30000 });
-              await page1.evaluate(() => (document.querySelector("#ts-telegram-link").value = ""));
-              await page1.type("#ts-telegram-link", telegramLink, { delay: 60 });
-              console.log("  ✓ Link entered");
+                const minId = Math.min(start.messageId, end.messageId);
+                const maxId = Math.max(start.messageId, end.messageId);
 
-              // ══════════════════════════════════════════════════════════════════
-              // STEP 2 — Click the Download button
-              // ══════════════════════════════════════════════════════════════════
-              console.log("\n[Step 2] Clicking Download button ...");
-              await page1.waitForSelector("#ts-download-btn", { timeout: 15000 });
-              await page1.click("#ts-download-btn");
+                console.log(`\n--- Range download: ${start.channel} messages ${minId} → ${maxId} ---`);
 
-              // ══════════════════════════════════════════════════════════════════
-              // STEP 3 — Wait for "Get Direct Download Link" button to appear
-              // ══════════════════════════════════════════════════════════════════
-              console.log("\n[Step 3] Waiting for 'Get Direct Download Link' ...");
-              let intermediateURL;
-              try {
-                intermediateURL = await pollPage(
-                  page1,
-                  () => {
-                    const btn = document.querySelector(
-                      ".ts-download-link-button:not(#download-btn)"
-                    );
-                    return btn && btn.href ? btn.href : null;
-                  },
-                  "Get Direct Download Link href",
-                  1000,
-                  60000
-                );
-              } catch (e) {
-                await screenshot(page1, downloadsDir, "debug_step3.png");
-                throw new Error("Could not find 'Get Direct Download Link' button: " + e.message);
+                let successCount = 0;
+                for (let id = minId; id <= maxId; id++) {
+                  const link = `https://t.me/${start.channel}/${id}`;
+                  const path = await processOneLink(link, browser, UA, downloadsDir);
+                  if (path) successCount++;
+                  // Small pause between requests to be polite
+                  await sleep(2000);
+                }
+
+                console.log(`\n══════════════════════════════════════════`);
+                console.log(` Range complete: ${successCount} of ${maxId - minId + 1} files downloaded.`);
+                console.log(`══════════════════════════════════════════\n`);
               }
-
-              // ══════════════════════════════════════════════════════════════════
-              // STEP 4 — Navigate to the intermediate page (new tab simulation)
-              // ══════════════════════════════════════════════════════════════════
-              console.log("\n[Step 4] Opening download page:", intermediateURL);
-              const page2 = await browser.newPage();
-              await setupPage(page2);
-
-              // We no longer need CDP for downloads because we will use direct Node.js download
-              await page2.goto(intermediateURL, {
-                waitUntil: "domcontentloaded",
-                timeout: 60000
-              });
-              await sleep(2000);
-
-              // ══════════════════════════════════════════════════════════════════
-              // STEP 5 — Wait for the countdown and extract the final download URL
-              // ══════════════════════════════════════════════════════════════════
-              console.log("\n[Step 5] Waiting for countdown + Download File button ...");
-              let downloadURL;
-              try {
-                downloadURL = await pollPage(
-                  page2,
-                  () => {
-                    const btn = document.querySelector("#download-btn");
-                    if (!btn) return null;
-                    const h = btn.getAttribute("href") || "";
-                    return h.startsWith("http") ? h : null;
-                  },
-                  "#download-btn href",
-                  1000,
-                  90000
-                );
-              } catch (e) {
-                await screenshot(page2, downloadsDir, "debug_step5.png");
-                throw new Error("Download File button href never became available: " + e.message);
-              }
-
-              // ══════════════════════════════════════════════════════════════════
-              // STEP 6 — Directly download the file using Node.js (with cookies)
-              //           This avoids button‑click issues and browser‑download hangs.
-              // ══════════════════════════════════════════════════════════════════
-              console.log("\n[Step 6] Downloading file directly via Node.js ...");
-
-              // Gather session cookies from the intermediate page
-              const cookies = await page2.cookies();
-
-              // Determine a clean filename from the download URL
-              const urlObj = new URL(downloadURL);
-              let rawFilename = path.basename(urlObj.pathname);   // e.g. "Grammatik-A2.pdf"
-              // Decode any percent-encoding (unlikely but safe)
-              rawFilename = decodeURIComponent(rawFilename);
-              // Sanitize: keep only safe characters
-              const filename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, "_") || "download";
-              const destPath = path.join(downloadsDir, filename);
-
-              try {
-                await directDownload(
-                  downloadURL,
-                  destPath,
-                  cookies,
-                  UA,
-                  intermediateURL   // referer = the page where the button appeared
-                );
-              } catch (err) {
-                await screenshot(page2, downloadsDir, "debug_download.png");
-                throw new Error("Direct download failed: " + err.message);
-              }
-
-              // Verify the file is complete
-              const fileStat = fs.statSync(destPath);
-              if (fileStat.size === 0) {
-                throw new Error("Downloaded file is empty.");
-              }
-              console.log(`  ✓ Downloaded: ${filename} (${(fileStat.size/1024/1024).toFixed(2)} MB)`);
-
-              // ══════════════════════════════════════════════════════════════════
-              // STEP 7 — Split if > 45 MB, otherwise leave as-is
-              // ══════════════════════════════════════════════════════════════════
-              const LIMIT = 45 * 1024 * 1024;
-              if (fileStat.size > LIMIT) {
-                console.log(`\n[Step 7] File is ${(fileStat.size/1024/1024).toFixed(2)} MB — splitting into 45 MB parts ...`);
-                execSync(`split -b 45M -d "${destPath}" "${destPath}.part_"`);
-                fs.unlinkSync(destPath);
-                const parts = fs.readdirSync(downloadsDir).filter(f => f.startsWith(filename + ".part_"));
-                console.log(`  ✓ Split into ${parts.length} parts:`, parts.join(", "));
-              } else {
-                console.log(`\n[Step 7] File is ${(fileStat.size/1024/1024).toFixed(2)} MB — no split needed.`);
-              }
-
-              console.log("\n══════════════════════════════════════════");
-              console.log(" All done! ✓");
-              console.log("══════════════════════════════════════════\n");
-
             } catch (err) {
               console.error("\n✗ Fatal error:", err.message);
-              try {
-                const pages = await browser.pages();
-                const last = pages[pages.length - 1];
-                await screenshot(last, downloadsDir, "debug_fatal.png");
-              } catch (_) {}
               await browser.close();
               process.exit(1);
             }
@@ -317,8 +306,20 @@ jobs:
 
       - name: Run download script
         env:
-          LINK: ${{ github.event.inputs.telegram_link }}
-        run: node download.js "$LINK"
+          SINGLE_LINK: ${{ github.event.inputs.telegram_link }}
+          START_LINK: ${{ github.event.inputs.start_link }}
+          END_LINK: ${{ github.event.inputs.end_link }}
+        run: |
+          if [ -n "$START_LINK" ] && [ -n "$END_LINK" ]; then
+            echo "Mode: range"
+            node download.js --range "$START_LINK" "$END_LINK"
+          elif [ -n "$SINGLE_LINK" ]; then
+            echo "Mode: single"
+            node download.js --single "$SINGLE_LINK"
+          else
+            echo "Error: You must provide either a single link or both start and end links."
+            exit 1
+          fi
 
       - name: Commit and push files
         if: always()
@@ -330,7 +331,7 @@ jobs:
             if git diff --cached --quiet; then
               echo "Nothing new to commit."
             else
-              git commit -m "Add downloaded Telegram file(s) from ${{ github.event.inputs.telegram_link }}"
+              git commit -m "Add downloaded Telegram file(s)"
               git push
             fi
           else
