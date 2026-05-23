@@ -18,7 +18,7 @@ permissions:
 jobs:
   export:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -27,28 +27,26 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Python dependencies
-        run: pip install beautifulsoup4 requests
-
-      - name: Install Playwright for scraping & screenshot
+      - name: Install Playwright
         run: |
-          pip install playwright
+          pip install playwright beautifulsoup4
           playwright install chromium
           playwright install-deps chromium
 
-      - name: Extract messages with Playwright
+      - name: Scrape Telegram channel with Playwright + debug screenshot
         id: scrape
         env:
           CHANNEL: ${{ github.event.inputs.channel_name }}
           COUNT: ${{ github.event.inputs.message_count }}
         run: |
           python << 'PYEOF'
-          import os, sys, json, datetime, time
+          import os, sys, json, datetime, time, re
+          from bs4 import BeautifulSoup
           from playwright.sync_api import sync_playwright
 
           channel = os.environ['CHANNEL']
-          target_count = int(os.environ['COUNT'])
-          url = f'https://t.me/s/{channel}'
+          count = int(os.environ['COUNT'])
+          base_url = f'https://t.me/s/{channel}'
           out_dir = "Telegram Export"
           os.makedirs(out_dir, exist_ok=True)
 
@@ -56,133 +54,157 @@ jobs:
           seen_ids = set()
           error_occurred = False
 
+          def extract_messages(html, channel):
+              found = []
+              soup = BeautifulSoup(html, 'html.parser')
+              wrappers = soup.find_all(attrs={"data-post": True})
+              print(f"  → {len(wrappers)} پیام پیدا شد")
+              for wrap in wrappers:
+                  data_post = wrap.get('data-post', '')
+                  if '/' not in data_post:
+                      continue
+                  try:
+                      msg_id = int(data_post.split('/')[-1])
+                  except ValueError:
+                      continue
+                  if msg_id in seen_ids:
+                      continue
+                  seen_ids.add(msg_id)
+
+                  # Text
+                  text = ""
+                  for sel in ['.tgme_widget_message_text', '[class*="message_text"]']:
+                      el = wrap.select_one(sel)
+                      if el:
+                          text = el.get_text(separator=' ', strip=True)
+                          break
+
+                  # File/document attachment
+                  file_info = None
+                  for sel in ['.tgme_widget_message_document_wrap', '[class*="document_wrap"]']:
+                      doc = wrap.select_one(sel)
+                      if doc:
+                          link = doc.get('href', 'not found')
+                          title_el = wrap.select_one('.tgme_widget_message_document_title') or \
+                                     wrap.select_one('[class*="document_title"]')
+                          fname = title_el.get_text(strip=True) if title_el else "unknown_file"
+                          ext_el = wrap.select_one('[class*="document_extra"]')
+                          ext = ext_el.get_text(strip=True) if ext_el else ""
+                          file_info = {"file_name": fname, "extension": ext, "link": link}
+                          break
+
+                  # Date
+                  date_str = ""
+                  time_el = wrap.select_one('time')
+                  if time_el:
+                      date_str = time_el.get('datetime', time_el.get_text(strip=True))
+
+                  # Views
+                  views = ""
+                  views_el = wrap.select_one('[class*="views"]')
+                  if views_el:
+                      views = views_el.get_text(strip=True)
+
+                  found.append({
+                      "message_id": msg_id,
+                      "date": date_str,
+                      "views": views,
+                      "text": text[:500] if text else "",
+                      "file": file_info,
+                      "message_link": f"https://t.me/{channel}/{msg_id}"
+                  })
+              return found
+
           with sync_playwright() as p:
-              browser = p.chromium.launch()
+              browser = p.chromium.launch(headless=True)
               context = browser.new_context(
-                  viewport={"width": 1280, "height": 900},
-                  user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-                  locale="en-US"
+                  user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                  locale='en-US',
+                  viewport={"width": 1280, "height": 900}
               )
               page = context.new_page()
 
-              print(f"📡 رفتن به {url}")
+              print(f"🌐 باز کردن {base_url}")
               try:
-                  page.goto(url, wait_until="networkidle", timeout=30000)
+                  page.goto(base_url, wait_until='networkidle', timeout=30000)
               except Exception as e:
-                  print(f"❌ خطا در بارگذاری صفحه: {e}")
-                  error_occurred = True
-                  # حتی در صورت خطا اسکرین‌شات بگیریم
-                  page.screenshot(path=os.path.join(out_dir, "debug_screenshot.png"), full_page=True)
-                  with open(os.path.join(out_dir, "debug_page.html"), "w", encoding="utf-8") as f:
-                      f.write(page.content())
-                  browser.close()
-                  sys.exit(1)
+                  print(f"⚠️ timeout یا خطا در بارگذاری اولیه: {e}")
 
-              # ذخیره اسکرین‌شات و HTML اولیه برای دیباگ
-              page.screenshot(path=os.path.join(out_dir, "debug_screenshot.png"), full_page=True)
-              with open(os.path.join(out_dir, "debug_page.html"), "w", encoding="utf-8") as f:
-                  f.write(page.content())
-              print("✅ اسکرین‌شات و HTML اولیه ذخیره شد")
+              # Screenshot of initial page load
+              screenshot_path = os.path.join(out_dir, "debug_screenshot_initial.png")
+              page.screenshot(path=screenshot_path, full_page=True)
+              print(f"📸 اسکرین‌شات اولیه ذخیره شد: {screenshot_path}")
 
-              # تابع استخراج پیام‌ها از DOM جاری
-              def extract_messages():
-                  new_msgs = []
-                  # تلگرام ممکنه از چند مدل wrapper استفاده کنه
-                  wrappers = page.query_selector_all('.tgme_widget_message_wrap')
-                  if not wrappers:
-                      wrappers = page.query_selector_all('.tgme_widget_message_bubble')
-                  if not wrappers:
-                      wrappers = page.query_selector_all('[data-post]')
-                  print(f"  → {len(wrappers)} wrapper پیدا شد")
-                  for wrap in wrappers:
-                      data_post = wrap.get_attribute('data-post')
-                      if not data_post:
-                          # ممکنه توی یه المنت والد باشه
-                          parent = wrap.evaluate('el => el.closest("[data-post]")')
-                          if parent:
-                              data_post = parent.get_attribute('data-post')
-                      if not data_post or '/' not in data_post:
-                          continue
-                      msg_id_str = data_post.split('/')[-1]
-                      try:
-                          msg_id = int(msg_id_str)
-                      except ValueError:
-                          continue
-                      if msg_id in seen_ids:
-                          continue
-                      seen_ids.add(msg_id)
-
-                      # متن پیام
-                      text = ""
-                      for sel in ['.tgme_widget_message_text', '.js-message_text', '[class*="message_text"]']:
-                          text_el = wrap.query_selector(sel)
-                          if text_el:
-                              text = text_el.inner_text()
-                              break
-
-                      # فایل ضمیمه
-                      file_info = None
-                      doc_wrap = wrap.query_selector('.tgme_widget_message_document_wrap, [class*="document"]')
-                      if doc_wrap:
-                          file_link = doc_wrap.get_attribute('href')
-                          title_el = wrap.query_selector('.tgme_widget_message_document_title, [class*="document_title"]')
-                          file_name = title_el.inner_text().strip() if title_el else "unknown_file"
-                          file_info = {
-                              "file_name": file_name,
-                              "download_link": file_link or "not found"
-                          }
-
-                      # تاریخ
-                      date_str = ""
-                      date_el = wrap.query_selector('time, [class*="time"]')
-                      if date_el:
-                          date_str = date_el.get_attribute('datetime') or date_el.inner_text().strip()
-
-                      new_msgs.append({
-                          "message_id": msg_id,
-                          "date": date_str,
-                          "text": text,
-                          "file": file_info,
-                          "message_link": f"https://t.me/{channel}/{msg_id}"
-                      })
-                  return new_msgs
-
-              # استخراج اولیه
-              messages.extend(extract_messages())
-
-              # کلیک روی "Load earlier messages" تا وقتی که تعداد کافی پیام جمع بشه
-              max_pages = 20  # جلوگیری از حلقه بی‌نهایت
-              page_num = 1
-              while len(messages) < target_count and page_num < max_pages:
-                  # دنبال لینک "Load earlier messages" می‌گردیم
-                  more_link = page.query_selector('a.tme_messages_more, [class*="messages_more"]')
-                  if not more_link:
-                      print("  → لینک «بارگذاری پیام‌های قدیمی‌تر» پیدا نشد")
-                      break
-                  print(f"  📄 کلیک روی لینک صفحه {page_num + 1} ...")
+              # Check if we landed on the right page (message feed vs profile page)
+              html = page.content()
+              if 'tgme_widget_message' not in html and 'data-post' not in html:
+                  print("⚠️ صفحه پروفایل کانال بارگذاری شد، نه فید پیام‌ها.")
+                  print("  → تلاش برای کلیک روی دکمه View in Telegram / پیوند پیام‌ها...")
+                  # Try clicking "View in Telegram" or similar CTA
                   try:
-                      # کلیک و منتظر بارگذاری محتوای جدید
-                      # wait_until="networkidle" بعد از کلیک
-                      more_link.click()
-                      page.wait_for_load_state("networkidle", timeout=15000)
-                      time.sleep(1)  # یکم فرصت بده DOM آپدیت بشه
-                  except Exception as e:
-                      print(f"  ⚠️ خطا هنگام کلیک: {e}")
+                      page.click('a[href*="t.me"]:has-text("View")', timeout=3000)
+                      page.wait_for_load_state('networkidle', timeout=10000)
+                  except:
+                      pass
+                  # Save the profile HTML for debugging
+                  with open(os.path.join(out_dir, "debug_profile_page.html"), 'w', encoding='utf-8') as f:
+                      f.write(html)
+                  html = page.content()
+
+              # Scroll up to load older messages until we have enough
+              page_num = 1
+              while len(messages) < count:
+                  html = page.content()
+                  new_msgs = extract_messages(html, channel)
+                  added = 0
+                  for m in new_msgs:
+                      if m['message_id'] not in seen_ids or True:  # seen_ids handled inside extract
+                          messages.append(m)
+                          added += 1
+
+                  # De-duplicate after merging
+                  unique = {}
+                  for m in messages:
+                      unique[m['message_id']] = m
+                  messages = list(unique.values())
+
+                  print(f"  [{page_num}] کل پیام‌های جمع‌آوری‌شده: {len(messages)}")
+
+                  if len(messages) >= count:
                       break
 
-                  new_msgs = extract_messages()
-                  print(f"  → {len(new_msgs)} پیام جدید استخراج شد")
-                  if not new_msgs:
-                      print("  ⚠️ هیچ پیام تازه‌ای پیدا نشد")
+                  # Click "Load more" button or scroll to top to trigger pagination
+                  loaded_more = False
+                  for selector in ['a.tme_messages_more', '[class*="messages_more"]', 'a[href*="before="]']:
+                      try:
+                          btn = page.query_selector(selector)
+                          if btn:
+                              btn.click()
+                              page.wait_for_load_state('networkidle', timeout=10000)
+                              time.sleep(1)
+                              loaded_more = True
+                              page_num += 1
+                              break
+                      except:
+                          pass
+
+                  if not loaded_more:
+                      print("  → دکمه بارگذاری بیشتر پیدا نشد، توقف.")
                       break
-                  messages.extend(new_msgs)
-                  page_num += 1
+
+              # Final screenshot after scrolling
+              page.screenshot(path=os.path.join(out_dir, "debug_screenshot_final.png"), full_page=True)
+              print(f"📸 اسکرین‌شات نهایی ذخیره شد.")
 
               browser.close()
 
-          # مرتب‌سازی و برش به تعداد درخواستی
-          messages = messages[:target_count]
+          if not messages:
+              print("❌ هیچ پیامی استخراج نشد.")
+              error_occurred = True
+
+          # Sort newest first, trim to count
           messages.sort(key=lambda m: m['message_id'], reverse=True)
+          messages = messages[:count]
 
           timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
           filepath = os.path.join(out_dir, f"export_{timestamp}.json")
@@ -190,7 +212,7 @@ jobs:
               "channel": channel,
               "channel_url": f"https://t.me/{channel}",
               "extracted_at": timestamp,
-              "requested_count": target_count,
+              "requested_count": count,
               "actual_count": len(messages),
               "messages": messages,
               "error_occurred": error_occurred
@@ -198,8 +220,8 @@ jobs:
           with open(filepath, 'w', encoding='utf-8') as f:
               json.dump(export_data, f, ensure_ascii=False, indent=2)
 
-          print(f"\n✅ {len(messages)} پیام استخراج و در {filepath} ذخیره شد.")
-          if error_occurred and len(messages) == 0:
+          print(f"\n✅ {len(messages)} پیام در {filepath} ذخیره شد.")
+          if error_occurred:
               sys.exit(1)
           PYEOF
 
