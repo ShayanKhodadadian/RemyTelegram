@@ -1,4 +1,4 @@
-name: Telegram Channel Export (Screenshots in Export)
+name: Telegram Channel Export (Stealth)
 
 on:
   workflow_dispatch:
@@ -44,7 +44,7 @@ jobs:
       - name: Install Playwright Chromium browser
         run: python -m playwright install chromium
 
-      - name: Scrape Telegram channel (with in-folder screenshots)
+      - name: Scrape Telegram channel (stealth mode)
         id: scrape
         env:
           CHANNEL: ${{ github.event.inputs.channel_name }}
@@ -59,17 +59,15 @@ jobs:
           count = int(os.environ['COUNT'])
           url = f'https://t.me/s/{channel}'
 
-          # پوشه اصلی خروجی را از ابتدا می‌سازیم
           out_dir = "Telegram Export"
           os.makedirs(out_dir, exist_ok=True)
 
-          messages = []
-
-          # اسکرین‌شات‌ها با نام ثابت در همین پوشه ذخیره می‌شوند
           screenshot_initial = os.path.join(out_dir, "debug_initial.png")
-          screenshot_error = os.path.join(out_dir, "debug_error.png")
-          screenshot_final = os.path.join(out_dir, "debug_final.png")
-          screenshot_unexpected = os.path.join(out_dir, "debug_unexpected.png")
+          screenshot_error   = os.path.join(out_dir, "debug_error.png")
+          screenshot_final   = os.path.join(out_dir, "debug_final.png")
+          screenshot_unexp   = os.path.join(out_dir, "debug_unexpected.png")
+
+          messages = []
 
           try:
               with sync_playwright() as p:
@@ -79,30 +77,54 @@ jobs:
                   )
                   context = browser.new_context(
                       user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                      viewport={'width': 1280, 'height': 800}
+                      viewport={'width': 1280, 'height': 800},
+                      bypass_csp=True,
+                      locale='en-US'
                   )
-                  page = context.new_page()
 
+                  # پنهان‌سازی navigator.webdriver و دیگر نشانه‌های headless
+                  context.add_init_script("""
+                      Object.defineProperty(navigator, 'webdriver', {
+                          get: () => undefined
+                      });
+                      // جلوگیری از تشخیص true بودن webdriver
+                      const originalQuery = window.navigator.permissions.query;
+                      window.navigator.permissions.query = (parameters) => (
+                          parameters.name === 'notifications' ?
+                          Promise.resolve({ state: Notification.permission }) :
+                          originalQuery(parameters)
+                      );
+                      // پوشاندن سایر مشخصه‌های خودکار
+                      Object.defineProperty(navigator, 'plugins', {
+                          get: () => [1, 2, 3, 4, 5]
+                      });
+                      Object.defineProperty(navigator, 'languages', {
+                          get: () => ['en-US', 'en']
+                      });
+                  """)
+
+                  page = context.new_page()
                   print(f"🌐 رفتن به آدرس: {url}")
-                  page.goto(url, timeout=30000, wait_until='networkidle')
+                  page.goto(url, timeout=30000, wait_until='domcontentloaded')
+                  # صبر اضافی برای بارگذاری کامل پیام‌ها
+                  page.wait_for_timeout(3000)
                   print(f"📄 عنوان صفحه: {page.title()}")
 
-                  # اسکرین‌شات اولیه
                   page.screenshot(path=screenshot_initial)
-                  print(f"📸 اسکرین‌شات اولیه در {screenshot_initial} ذخیره شد.")
+                  print(f"📸 اسکرین‌شات اولیه ذخیره شد: {screenshot_initial}")
 
-                  # منتظر ماندن برای ظاهر شدن پیام‌ها
+                  # انتظار برای ظاهر شدن پیام‌ها
                   try:
-                      page.wait_for_selector('.tgme_widget_message_wrap', timeout=20000)
-                      print("✅ پیام‌ها در صفحه ظاهر شدند.")
+                      page.wait_for_selector('.tgme_widget_message_wrap', timeout=25000)
+                      print("✅ پیام‌ها ظاهر شدند.")
                   except PlaywrightTimeout:
-                      print("⏰ پیام‌ها در زمان مقرر بارگذاری نشدند.")
+                      print("⏰ پیام‌ها بارگذاری نشدند. ذخیره اسکرین‌شات خطا...")
                       page.screenshot(path=screenshot_error)
-                      print(f"❌ اسکرین‌شات خطا در {screenshot_error} ذخیره شد. خروج.")
+                      print(f"❌ اسکرین‌شات خطا: {screenshot_error}")
                       browser.close()
                       sys.exit(1)
 
-                  # اسکرول و استخراج پیام‌ها
+                  # استخراج پیام‌ها
                   previous_count = 0
                   while len(messages) < count:
                       html = page.content()
@@ -143,7 +165,7 @@ jobs:
                               break
 
                       if len(messages) == previous_count:
-                          print("ℹ️  پیام جدیدی بارگذاری نشد (پایان کانال یا خطا). توقف.")
+                          print("ℹ️  پیام جدیدی بارگذاری نشد (اتمام یا خطا). توقف.")
                           break
                       previous_count = len(messages)
 
@@ -153,50 +175,45 @@ jobs:
                               last_wrapper.scroll_into_view_if_needed()
                               time.sleep(2.5)
 
-                  # اسکرین‌شات نهایی
                   page.screenshot(path=screenshot_final)
-                  print(f"📸 اسکرین‌شات نهایی در {screenshot_final} ذخیره شد.")
+                  print(f"📸 اسکرین‌شات نهایی: {screenshot_final}")
                   browser.close()
 
           except Exception as e:
               print(f"🔥 خطای غیرمنتظره: {e}")
               try:
                   if 'page' in locals():
-                      page.screenshot(path=screenshot_unexpected)
-                      print(f"📸 اسکرین‌شات خطای پیش‌بینی‌نشده در {screenshot_unexpected} ذخیره شد.")
+                      page.screenshot(path=screenshot_unexp)
+                      print(f"📸 اسکرین‌شات خطای غیرمنتظره: {screenshot_unexp}")
               except:
                   pass
               sys.exit(1)
 
-          # ذخیره JSON نهایی
+          # ذخیره JSON
           timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-          filename = f"export_{timestamp}.json"
-          filepath = os.path.join(out_dir, filename)
-
+          filepath = os.path.join(out_dir, f"export_{timestamp}.json")
           with open(filepath, 'w', encoding='utf-8') as f:
               json.dump(messages[:count], f, ensure_ascii=False, indent=2)
-
           print(f"✅ {len(messages[:count])} پیام در {filepath} ذخیره شد.")
           PYEOF
 
-      - name: Upload debug screenshots (as artifact)
+      - name: Upload debug screenshots & export folder
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: telegram-export-files
-          path: Telegram Export/        # کل پوشه (هم JSON هم اسکرین‌شات‌ها) آپلود می‌شود
+          path: Telegram Export/
           retention-days: 3
 
-      - name: Commit and push all export results
-        if: always()   # حتی اگر scrape شکست خورد، اسکرین‌شات‌ها commit شوند
+      - name: Commit and push results to repo
+        if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          # فقط اگر تغییری در پوشه Telegram Export باشد commit می‌کنیم
           git add "Telegram Export/"
           if git diff --staged --quiet; then
-            echo "هیچ تغییری در Telegram Export وجود ندارد."
+            echo "No changes to commit."
           else
-            git commit -m "📤 Telegram export + debug screenshots for ${{ github.event.inputs.channel_name }}"
+            git commit -m "📤 Export + screenshots for ${{ github.event.inputs.channel_name }}"
             git push
           fi
