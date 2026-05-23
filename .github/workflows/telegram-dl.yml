@@ -23,329 +23,179 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install dependencies
+      - name: Install system dependencies (for Puppeteer)
         run: |
-          npm install puppeteer axios
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
+            libxdamage1 libxfixes3 libxrandr2 libgbm1 \
+            libpango-1.0-0 libcairo2 libasound2
+
+      - name: Install npm packages
+        run: npm install puppeteer axios
 
       - name: Create script
         run: |
-
           cat > download.js << 'EOF'
+          const puppeteer = require("puppeteer");
+          const fs = require("fs");
+          const path = require("path");
+          const axios = require("axios");
+          const { execSync } = require("child_process");
 
-          const puppeteer=require("puppeteer");
-          const fs=require("fs");
-          const path=require("path");
-          const axios=require("axios");
-          const {execSync}=require("child_process");
+          (async () => {
+            const telegramLink = process.argv[2];
+            if (!telegramLink) throw new Error("No telegram link");
 
-          (async()=>{
-
-          const telegramLink=process.argv[2];
-
-          if(!telegramLink){
-            throw new Error("No telegram link");
-          }
-
-          console.log("Launching browser");
-
-          const browser=await puppeteer.launch({
-            headless:true,
-            args:[
-              "--no-sandbox",
-              "--disable-setuid-sandbox"
-            ]
-          });
-
-          try{
-
-          const page=await browser.newPage();
-
-          await page.setUserAgent(
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
-          );
-
-          await page.setViewport({
-          width:1366,
-          height:768
-          });
-
-          page.setDefaultTimeout(90000);
-
-          console.log("Opening site");
-
-          await page.goto(
-          "https://telegramdownloader.net/",
-          {
-          waitUntil:"domcontentloaded",
-          timeout:90000
-          }
-          );
-
-          await new Promise(
-          r=>setTimeout(r,10000)
-          );
-
-          console.log("Current URL:");
-          console.log(page.url());
-
-          console.log("Page title:");
-          console.log(await page.title());
-
-          console.log("Waiting for textbox");
-
-          await page.waitForFunction(() => {
-          return document.querySelector(
-          '#ts-telegram-link'
-          )!==null
-          },{
-          timeout:90000
-          });
-
-          await page.focus(
-          "#ts-telegram-link"
-          );
-
-          await page.evaluate(()=>{
-          document.querySelector(
-          "#ts-telegram-link"
-          ).value="";
-          });
-
-          await page.type(
-          "#ts-telegram-link",
-          telegramLink,
-          {
-          delay:50
-          }
-          );
-
-          await page.type(
-            "#ts-telegram-link",
-            telegramLink
-          );
-
-          console.log("Click Download");
-
-          await page.evaluate(()=>{
-          document.querySelector(
-          "#ts-download-btn"
-          ).click();
-          });
-
-          console.log(
-            "Waiting for direct link button"
-          );
-
-          await page.waitForSelector(
-            ".ts-download-link-button",
-            {
-              timeout:30000
-            }
-          );
-
-          const href=await page.$eval(
-            ".ts-download-link-button",
-            el=>el.href
-          );
-
-          console.log(
-            "Direct page:"
-          );
-
-          console.log(href);
-
-          const directPage=await browser.newPage();
-
-          await directPage.goto(
-            href,
-            {
-              waitUntil:"networkidle2"
-            }
-          );
-
-          console.log(
-            "Waiting timer..."
-          );
-
-          await directPage.waitForSelector(
-            "#download-btn",
-            {
-              timeout:30000
-            }
-          );
-
-          await new Promise(
-            r=>setTimeout(r,16000)
-          );
-
-          const downloadURL=
-          await directPage.$eval(
-            "#download-btn",
-            el=>el.href
-          );
-
-          console.log(
-            "Final URL:"
-          );
-
-          console.log(
-            downloadURL
-          );
-
-          await browser.close();
-
-          console.log(
-            "Downloading..."
-          );
-
-          const response=
-          await axios({
-            method:"GET",
-            url:downloadURL,
-            responseType:"stream"
-          });
-
-          let filename="telegram_file";
-
-          const cd=
-          response.headers[
-            "content-disposition"
-          ];
-
-          if(cd){
-
-            const m=
-            cd.match(
-              /filename="?(.+?)"?$/
-            );
-
-            if(m){
-              filename=m[1];
+            const downloadsDir = "Downloads";
+            if (!fs.existsSync(downloadsDir)) {
+              fs.mkdirSync(downloadsDir, { recursive: true });
             }
 
-          }else{
+            console.log("Launching browser");
+            const browser = await puppeteer.launch({
+              headless: true,
+              args: ["--no-sandbox", "--disable-setuid-sandbox"]
+            });
 
-            filename=
-            path.basename(
-              new URL(downloadURL)
-              .pathname
-            );
+            try {
+              const page = await browser.newPage();
+              await page.setUserAgent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+              );
+              await page.setViewport({ width: 1366, height: 768 });
+              page.setDefaultTimeout(90000);
 
-          }
+              console.log("Opening site");
+              await page.goto("https://telegramdownloader.net/", {
+                waitUntil: "domcontentloaded",
+                timeout: 90000
+              });
+              await new Promise(r => setTimeout(r, 10000));
 
-          await new Promise(
-            (resolve,reject)=>{
+              console.log("Current URL:", page.url());
+              console.log("Page title:", await page.title());
 
-            const writer=
-            fs.createWriteStream(
-              filename
-            );
+              console.log("Waiting for textbox");
+              await page.waitForFunction(() => document.querySelector("#ts-telegram-link") !== null, { timeout: 90000 });
 
-            response.data.pipe(
-              writer
-            );
+              await page.focus("#ts-telegram-link");
+              await page.evaluate(() => { document.querySelector("#ts-telegram-link").value = ""; });
+              // حذف تایپ تکراری – فقط یک بار تایپ می‌کنیم
+              await page.type("#ts-telegram-link", telegramLink, { delay: 50 });
 
-            writer.on(
-              "finish",
-              resolve
-            );
+              console.log("Click Download");
+              await page.evaluate(() => document.querySelector("#ts-download-btn").click());
 
-            writer.on(
-              "error",
-              reject
-            );
+              console.log("Waiting for direct link button");
+              await page.waitForSelector(".ts-download-link-button", { timeout: 30000 });
+              const href = await page.$eval(".ts-download-link-button", el => el.href);
+              console.log("Direct page:", href);
 
-          });
+              const directPage = await browser.newPage();
+              await directPage.goto(href, { waitUntil: "networkidle2" });
+              console.log("Waiting timer...");
+              await directPage.waitForSelector("#download-btn", { timeout: 30000 });
+              await new Promise(r => setTimeout(r, 16000));
 
-          console.log(
-            "Saved:",
-            filename
-          );
+              const downloadURL = await directPage.$eval("#download-btn", el => el.href);
+              console.log("Final URL:", downloadURL);
 
-          const downloadsDir=
-          "Downloads";
+              // دریافت کوکی‌ها برای دانلود
+              const cookies = await directPage.cookies();
+              const cookieString = cookies.map(c => `${c.name}=${c.value}`).join("; ");
+              const referer = href;
 
-          fs.mkdirSync(
-            downloadsDir,
-            {
-              recursive:true
+              console.log("Downloading with axios...");
+              const response = await axios({
+                method: "GET",
+                url: downloadURL,
+                responseType: "stream",
+                headers: {
+                  Cookie: cookieString,
+                  Referer: referer
+                }
+              });
+
+              let filename = "telegram_file";
+              const cd = response.headers["content-disposition"];
+              if (cd) {
+                const m = cd.match(/filename="?(.+?)"?$/);
+                if (m) filename = m[1];
+              } else {
+                filename = path.basename(new URL(downloadURL).pathname);
+              }
+
+              await new Promise((resolve, reject) => {
+                const writer = fs.createWriteStream(filename);
+                response.data.pipe(writer);
+                writer.on("finish", resolve);
+                writer.on("error", reject);
+              });
+
+              console.log("Saved:", filename);
+
+              const size = fs.statSync(filename).size;
+              const limit = 45 * 1024 * 1024;
+
+              if (size > limit) {
+                console.log("Splitting...");
+                execSync(`split -b 45M -d "${filename}" "${downloadsDir}/${filename}.part_"`);
+                fs.unlinkSync(filename);
+              } else {
+                fs.renameSync(filename, `${downloadsDir}/${filename}`);
+              }
+
+              console.log("Done");
+              await browser.close();
+
+            } catch (e) {
+              console.error("Error occurred:", e);
+
+              // تلاش برای گرفتن اسکرین‌شات از وضعیت فعلی مرورگر
+              try {
+                if (browser && browser.isConnected()) {
+                  const pages = await browser.pages();
+                  const currentPage = pages.length > 0 ? pages[pages.length - 1] : null;
+                  if (currentPage) {
+                    const screenshotPath = path.join(downloadsDir, "debug.png");
+                    await currentPage.screenshot({ path: screenshotPath, fullPage: true });
+                    console.log(`Screenshot saved to ${screenshotPath}`);
+                  }
+                }
+              } catch (ssError) {
+                console.error("Could not capture screenshot:", ssError);
+              }
+
+              await browser.close();
+              process.exit(1);
             }
-          );
-
-          const size=
-          fs.statSync(
-            filename
-          ).size;
-
-          const limit=
-          45*1024*1024;
-
-          if(size>limit){
-
-            console.log(
-              "Splitting..."
-            );
-
-            execSync(
-            `split -b 45M -d "${filename}" "${downloadsDir}/${filename}.part_"`
-            );
-
-            fs.unlinkSync(
-              filename
-            );
-
-          }else{
-
-            fs.renameSync(
-              filename,
-              `${downloadsDir}/${filename}`
-            );
-
-          }
-
-          console.log(
-            "Done"
-          );
-
-          }catch(e){
-
-            console.error(e);
-
-            await browser.close();
-
-            process.exit(1);
-
-          }
-
           })();
-
           EOF
 
       - name: Run script
+        continue-on-error: true   # اجازه می‌ده مرحله‌های بعد حتی در صورت خطا اجرا شوند
         env:
           LINK: ${{ github.event.inputs.telegram_link }}
-        run: |
-          node download.js "$LINK"
+        run: node download.js "$LINK"
 
-      - name: Commit files
+      - name: Commit files (including debug screenshot if any)
+        if: always()    # همیشه اجرا شود، چه موفقیت چه خطا
         run: |
-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
           git add Downloads/
-
-          if git diff --cached --quiet
-          then
-            echo "No changes"
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
           else
-            git commit -m "Add Telegram files"
+            git commit -m "Add Telegram files and/or debug screenshot"
             git push
           fi
 
-      - name: Upload debug screenshot
-        uses: actions/upload-artifact@v4
+      - name: Upload debug artifact (backup)
         if: always()
+        uses: actions/upload-artifact@v4
         with:
           name: debug
-          path: debug.png
+          path: Downloads/debug.png
