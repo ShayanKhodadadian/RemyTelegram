@@ -33,15 +33,23 @@ jobs:
           const path = require('path');
           const { execSync } = require('child_process');
 
-          // تابع کلیک روی المنت با XPath
-          async function clickXPath(page, xpath, timeoutMs = 10000) {
+          // تابع کلیک روی یک المنت با چند XPath مختلف (تلاش متوالی)
+          async function clickWhenAnyXPath(page, xpaths, timeoutMs = 10000) {
             const start = Date.now();
             while (Date.now() - start < timeoutMs) {
-              const element = await page.$(`::-p-xpath(${xpath})`);
-              if (element) {
-                await element.click();
-                console.log(`Clicked: ${xpath}`);
-                return true;
+              for (const xpath of xpaths) {
+                try {
+                  // استفاده از waitForSelector با پیشوند xpath/
+                  await page.waitForSelector(`xpath/${xpath}`, { visible: true, timeout: Math.min(2000, timeoutMs) });
+                  const elements = await page.$x(xpath); // $x هنوز در این نسخه کار می‌کند
+                  if (elements.length > 0) {
+                    await elements[0].click();
+                    console.log(`Clicked: ${xpath}`);
+                    return true;
+                  }
+                } catch (e) {
+                  // اگر این XPath پیدا نشد، به بعدی برو
+                }
               }
               await new Promise(r => setTimeout(r, 500));
             }
@@ -70,7 +78,7 @@ jobs:
                 waitUntil: 'networkidle0',
                 timeout: 30000
               });
-              await new Promise(r => setTimeout(r, 3000)); // صبر برای لود کامل
+              await new Promise(r => setTimeout(r, 3000));
               await page.screenshot({ path: 'page_loaded.png' });
 
               // پر کردن فیلد ورودی
@@ -79,9 +87,9 @@ jobs:
               await page.type('#ts-telegram-link', telegramLink);
               console.log('Link pasted.');
 
-              // کلیک روی دکمهٔ Download (چند انتخاب‌گر مختلف)
+              // کلیک روی دکمهٔ Download با چند XPath جایگزین
               console.log('Clicking the Download button...');
-              const downloadClicked = await clickXPath(page, [
+              const downloadClicked = await clickWhenAnyXPath(page, [
                 "//button[contains(text(), 'Download')]",
                 "//input[@type='submit'][contains(@value, 'Download')]",
                 "//a[contains(text(), 'Download')]",
@@ -95,16 +103,18 @@ jobs:
                 throw new Error('Download button not found.');
               }
 
-              // صبر برای ظاهر شدن دکمهٔ Get Direct Download Link
+              // صبر برای دکمهٔ Get Direct Download Link
               console.log('Waiting for "Get Direct Download Link"...');
-              const getDirectXPath = "//a[contains(text(), 'Get Direct Download Link')]";
-              const getDirectClicked = await clickXPath(page, getDirectXPath, 25000);
+              const getDirectClicked = await clickWhenAnyXPath(page, [
+                "//a[contains(text(), 'Get Direct Download Link')]"
+              ], 25000);
+
               if (!getDirectClicked) {
                 await page.screenshot({ path: 'getdirect_not_found.png' });
                 throw new Error('"Get Direct Download Link" button not found.');
               }
 
-              // حالا به صفحهٔ تایمر می‌رویم
+              // پیمایش به صفحهٔ تایمر
               await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => {});
               console.log('Current URL:', page.url());
 
@@ -113,7 +123,7 @@ jobs:
               await page.waitForSelector('#download-btn', { visible: true, timeout: 25000 });
               await page.click('#download-btn');
 
-              // انتقال به لینک دانلود مستقیم
+              // پیمایش به دامنهٔ دانلود
               await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 30000 }).catch(() => {});
               const downloadUrl = page.url();
               console.log('Final download URL:', downloadUrl);
@@ -124,12 +134,11 @@ jobs:
               await browser.close();
               console.log('Browser closed.');
 
-              // دانلود فایل با fetch
+              // دانلود فایل
               console.log('Starting file download...');
               const res = await fetch(downloadUrl, { redirect: 'follow' });
               if (!res.ok) throw new Error(`Download failed: ${res.status}`);
 
-              // تشخیص نام فایل
               const disposition = res.headers.get('content-disposition');
               let filename = 'telegram_file';
               if (disposition) {
@@ -155,7 +164,7 @@ jobs:
               });
               console.log('File saved.');
 
-              // مدیریت حجم و تقسیم
+              // تقسیم فایل اگر بزرگتر از ۴۵ مگابایت
               const stats = fs.statSync(filename);
               const maxSize = 45 * 1024 * 1024;
               const downloadsDir = 'Downloads';
