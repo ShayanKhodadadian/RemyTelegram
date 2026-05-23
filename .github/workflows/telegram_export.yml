@@ -1,0 +1,132 @@
+name: Telegram Channel Export
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel_name:
+        description: 'آدرس کانال (بدون @) مثلاً DeutschMahroo'
+        required: true
+        default: 'DeutschMahroo'
+      message_count:
+        description: 'تعداد پیام‌های اخیر برای دریافت'
+        required: true
+        default: '20'
+
+# مجوز نوشتن برای push کردن تغییرات
+permissions:
+  contents: write
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
+
+      - name: Run Telegram scraper
+        env:
+          CHANNEL: ${{ github.event.inputs.channel_name }}
+          COUNT: ${{ github.event.inputs.message_count }}
+        run: |
+          python << 'PYEOF'
+          import os, requests, time, json, datetime
+          from bs4 import BeautifulSoup
+
+          channel = os.environ['CHANNEL']
+          count = int(os.environ['COUNT'])
+          base_url = f'https://t.me/s/{channel}'
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          }
+
+          messages = []
+          current_url = base_url
+
+          while len(messages) < count:
+              resp = requests.get(current_url, headers=headers, timeout=15)
+              if resp.status_code != 200:
+                  print(f"Failed to fetch page: {resp.status_code}")
+                  break
+
+              soup = BeautifulSoup(resp.text, 'html.parser')
+              msg_containers = soup.select('.tgme_widget_message_wrap')
+
+              if not msg_containers:
+                  print("No messages found on page.")
+                  break
+
+              for container in msg_containers:
+                  if len(messages) >= count:
+                      break
+
+                  msg_id_raw = container.get('data-post', '')
+                  if not msg_id_raw or '/' not in msg_id_raw:
+                      continue
+                  msg_id_num = msg_id_raw.split('/')[-1]
+
+                  # متن پیام
+                  text_div = container.select_one('.tgme_widget_message_text')
+                  text = text_div.get_text(strip=True) if text_div else ""
+
+                  # فایل پیوست (مانند PDF)
+                  file_info = None
+                  doc_wrap = container.select_one('.tgme_widget_message_document_wrap')
+                  if doc_wrap:
+                      file_link = doc_wrap.get('href')
+                      title_el = container.select_one('.tgme_widget_message_document_title')
+                      file_name = title_el.get_text(strip=True) if title_el else "unknown_file"
+                      file_info = {
+                          "file_name": file_name,
+                          "download_link": file_link
+                      }
+
+                  # لینک خود پیام
+                  message_link = f"https://t.me/{channel}/{msg_id_num}"
+
+                  messages.append({
+                      "message_id": int(msg_id_num),
+                      "text": text,
+                      "file": file_info,
+                      "message_link": message_link
+                  })
+
+              # رفتن به صفحه‌ی قدیمی‌تر
+              last_msg = msg_containers[-1]
+              last_id = last_msg.get('data-post', '').split('/')[-1]
+              if not last_id:
+                  break
+              current_url = f"{base_url}?before={last_id}"
+              time.sleep(1)  # یک ثانیه مکث برای رعایت ادب
+
+          messages = messages[:count]
+
+          # ساختن پوشه و فایل خروجی
+          out_dir = "Telegram Export"
+          os.makedirs(out_dir, exist_ok=True)
+
+          timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+          filename = f"export_{timestamp}.json"
+          filepath = os.path.join(out_dir, filename)
+
+          with open(filepath, 'w', encoding='utf-8') as f:
+              json.dump(messages, f, ensure_ascii=False, indent=2)
+
+          print(f"✅ {len(messages)} پیام با موفقیت در {filepath} ذخیره شد.")
+          PYEOF
+
+      - name: Commit and push results
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add "Telegram Export/"
+          git diff --staged --quiet || (git commit -m "📤 Export Telegram messages for ${{ github.event.inputs.channel_name }}" && git push)
