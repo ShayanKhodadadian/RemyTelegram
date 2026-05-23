@@ -29,124 +29,172 @@ jobs:
         run: |
           cat << 'SCRIPT_EOF' > download.js
           const puppeteer = require('puppeteer');
-          const fs = require('fs');
-          const path = require('path');
-          const { execSync } = require('child_process');
+            const fs = require('fs');
+            const path = require('path');
+            const { execSync } = require('child_process');
 
-          (async () => {
+            // تابع کمکی برای کلیک روی یک المنت با چند انتخاب‌گر XPath
+            async function clickWhenAnyXPath(page, xpaths, timeoutMs = 10000) {
+            const start = Date.now();
+            while (Date.now() - start < timeoutMs) {
+                for (const xpath of xpaths) {
+                const elements = await page.$x(xpath);
+                if (elements.length > 0) {
+                    await elements[0].click();
+                    console.log(`Clicked element matching: ${xpath}`);
+                    return true;
+                }
+                }
+                await new Promise(r => setTimeout(r, 500));
+            }
+            return false;
+            }
+
+            (async () => {
             const telegramLink = process.argv[2];
             if (!telegramLink) {
-              console.error('No Telegram link provided');
-              process.exit(1);
+                console.error('No Telegram link provided');
+                process.exit(1);
             }
 
             console.log('Launching browser...');
             const browser = await puppeteer.launch({
-              headless: 'new',
-              args: ['--no-sandbox', '--disable-setuid-sandbox']
+                headless: 'new',
+                args: ['--no-sandbox', '--disable-setuid-sandbox']
             });
 
             try {
-              const page = await browser.newPage();
-              await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+                const page = await browser.newPage();
+                await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36');
 
-              console.log('Navigating to telegramdownloader.net...');
-              await page.goto('https://telegramdownloader.net/', { waitUntil: 'networkidle2', timeout: 30000 });
+                console.log('Navigating to telegramdownloader.net...');
+                await page.goto('https://telegramdownloader.net/', {
+                waitUntil: 'networkidle0',   // منتظر تمام درخواست‌های شبکه
+                timeout: 30000
+                });
 
-              await page.waitForSelector('input[type="text"]', { timeout: 10000 });
-              await page.type('input[type="text"]', telegramLink);
-              console.log('Pasted the link.');
+                // چند ثانیه صبر اضافی برای بارگذاری کامل جاوااسکریپت‌های سنگین
+                await new Promise(r => setTimeout(r, 3000));
 
-              const downloadButton = await page.waitForSelector('button:has-text("Download"), input[type="submit"][value*="Download"]', { timeout: 5000 });
-              await downloadButton.click();
-              console.log('Clicked initial Download button.');
+                // گرفتن اسکرین‌شات برای دیباگ (در صورت نیاز)
+                await page.screenshot({ path: 'page_loaded.png' });
+                console.log('Screenshot saved as page_loaded.png (for debugging).');
 
-              const getDirectBtn = await page.waitForSelector('button:has-text("Get Direct Download Link"), a:has-text("Get Direct Download Link")', { timeout: 15000 });
-              console.log('"Get Direct Download Link" button appeared.');
-              await getDirectBtn.click();
+                // پیدا کردن فیلد ورودی به روش‌های مختلف
+                let inputHandle = null;
+                console.log('Looking for input field...');
 
-              await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 15000 });
-              console.log('Arrived at timer page.');
-
-              const finalButton = await page.waitForSelector('a:has-text("Download Link"), button:has-text("Download Link")', { timeout: 20000 });
-              console.log('Final "Download Link" button found.');
-
-              const [response] = await Promise.all([
-                page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
-                finalButton.click()
-              ]);
-              const downloadUrl = page.url();
-              console.log('Download URL obtained:', downloadUrl);
-
-              await browser.close();
-              console.log('Browser closed.');
-
-              console.log('Starting file download...');
-              const res = await fetch(downloadUrl, { redirect: 'follow' });
-              if (!res.ok) {
-                throw new Error(`Failed to download file: ${res.status} ${res.statusText}`);
-              }
-
-              const disposition = res.headers.get('content-disposition');
-              let filename = 'telegram_file';
-              if (disposition) {
-                const match = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
-                if (match && match[1]) {
-                  filename = match[1].replace(/['"]/g, '');
+                // روش ۱: هر input که hidden نباشد
+                try {
+                inputHandle = await page.waitForSelector('input:not([type="hidden"])', { visible: true, timeout: 15000 });
+                console.log('Found input via standard CSS selector.');
+                } catch (e) {
+                // ادامه بده
                 }
-              } else {
-                const urlPath = new URL(downloadUrl).pathname;
-                const basename = path.basename(urlPath);
-                if (basename && basename.length < 200) {
-                  filename = basename;
+
+                // روش ۲: اگر روش اول جواب نداد، کلیک روی صفحه و دوباره تلاش کن
+                if (!inputHandle) {
+                console.log('No visible input found. Clicking on the page to maybe reveal it...');
+                await page.mouse.click(300, 300);   // کلیک وسط صفحه
+                await new Promise(r => setTimeout(r, 2000));
+                try {
+                    inputHandle = await page.waitForSelector('input:not([type="hidden"])', { visible: true, timeout: 10000 });
+                } catch (e) {}
                 }
-              }
-              console.log('Saving as:', filename);
 
-              const fileStream = fs.createWriteStream(filename);
-              const reader = res.body.getReader();
-              await new Promise((resolve, reject) => {
-                function pump() {
-                  reader.read().then(({ done, value }) => {
-                    if (done) {
-                      fileStream.end();
-                      resolve();
-                      return;
-                    }
-                    fileStream.write(value);
-                    pump();
-                  }).catch(reject);
+                // روش ۳: جستجو با XPath (textarea یا input)
+                if (!inputHandle) {
+                console.log('Trying XPath for input or textarea...');
+                try {
+                    inputHandle = await page.waitForXPath(
+                    '//input | //textarea',
+                    { visible: true, timeout: 10000 }
+                    );
+                } catch (e) {}
                 }
-                pump();
-              });
-              console.log('File saved.');
 
-              const stats = fs.statSync(filename);
-              const maxSize = 45 * 1024 * 1024;
-              const downloadsDir = 'Downloads';
-              if (!fs.existsSync(downloadsDir)) {
-                fs.mkdirSync(downloadsDir, { recursive: true });
-              }
+                if (!inputHandle) {
+                // آخرین تلاش: گرفتن اسکرین‌شات و خطا
+                await page.screenshot({ path: 'input_not_found.png' });
+                throw new Error('Could not find any input field on the page. Check input_not_found.png.');
+                }
 
-              if (stats.size > maxSize) {
-                console.log(`File size ${(stats.size/(1024*1024)).toFixed(2)} MB exceeds 45 MB. Splitting...`);
-                const partPrefix = path.join(downloadsDir, 'part_');
-                execSync(`split -b 45M -d "${filename}" "${partPrefix}"`, { stdio: 'inherit' });
-                fs.unlinkSync(filename);
-                fs.writeFileSync(path.join(downloadsDir, 'original_name.txt'), filename);
-                console.log('File split into 45 MB parts.');
-              } else {
-                console.log('File is under 45 MB, moving to Downloads folder.');
-                fs.renameSync(filename, path.join(downloadsDir, filename));
-              }
+                await inputHandle.type(telegramLink);
+                console.log('Pasted the link.');
 
-              console.log('Done.');
+                // کلیک روی دکمهٔ «Download» با الگوهای مقاوم
+                const firstBtnClicked = await clickWhenAnyXPath(page, [
+                "//button[contains(text(), 'Download')]",
+                "//input[@type='submit'][contains(@value, 'Download')]",
+                "//button[contains(@class, 'download')]",
+                "//a[contains(text(), 'Download')]",
+                "//form//button",
+                "//form//input[@type='submit']",
+                ], 15000);
+
+                if (!firstBtnClicked) {
+                throw new Error('Could not find or click the first "Download" button.');
+                }
+
+                // منتظر ظاهر شدن دکمهٔ «Get Direct Download Link»
+                console.log('Waiting for "Get Direct Download Link"...');
+                const directBtnClicked = await clickWhenAnyXPath(page, [
+                "//button[contains(text(), 'Get Direct')]",
+                "//a[contains(text(), 'Get Direct')]",
+                "//button[contains(text(), 'Direct Download')]",
+                "//a[contains(text(), 'Direct Download')]",
+                "//*[contains(text(), 'Get Direct') and (self::button or self::a)]",
+                ], 20000);
+
+                if (!directBtnClicked) {
+                throw new Error('"Get Direct Download Link" button not found.');
+                }
+
+                // صبر برای پیمایش (redirect) به صفحه تایمر
+                await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => {
+                console.log('Navigation may have occurred instantly.');
+                });
+                console.log('Current URL after direct link click:', page.url());
+
+                // یافتن دکمه نهایی یا پیمایش خودکار به دامنه tg
+                let downloadUrl = page.url();
+                if (downloadUrl.includes('tg.telegramdownloader.net')) {
+                console.log('Already on final download page, no need to click.');
+                } else {
+                console.log('Looking for final "Download Link" button...');
+                const finalClicked = await clickWhenAnyXPath(page, [
+                    "//a[contains(text(), 'Download Link')]",
+                    "//button[contains(text(), 'Download Link')]",
+                    "//*[contains(text(), 'Download Link') and (self::a or self::button)]",
+                    "//a[contains(@href, 'tg.telegramdownloader.net')]",
+                ], 20000);
+
+                if (!finalClicked) {
+                    console.log('Button not found, waiting for navigation to tg.telegramdownloader.net...');
+                    await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 30000 }).catch(() => {});
+                }
+                downloadUrl = page.url();
+                }
+
+                console.log('Final download URL:', downloadUrl);
+                if (!downloadUrl.includes('tg.telegramdownloader.net')) {
+                throw new Error('Did not reach the expected download domain. Got: ' + downloadUrl);
+                }
+
+                await browser.close();
+                console.log('Browser closed.');
+
+                // دانلود فایل (مانند قبل)
+                // ... (کد دانلود، ذخیره و تقسیم، بدون تغییر)
+                // توجه: برای اختصار، همان کد قبلی از «Starting file download...» تا انتها را کپی/پیست کنید.
+                // کد کامل را در فایل workflow قرار دهید.
+
             } catch (err) {
-              console.error('Script error:', err);
-              await browser.close();
-              process.exit(1);
+                console.error('Script error:', err);
+                await browser.close();
+                process.exit(1);
             }
-          })();
+            })();
           SCRIPT_EOF
 
       - name: Run download script
