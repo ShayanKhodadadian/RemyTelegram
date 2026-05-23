@@ -23,17 +23,22 @@ jobs:
         with:
           node-version: "20"
 
+      # نصب puppeteer-extra و افزونهٔ Stealth
       - name: Install npm packages
-        run: npm install puppeteer axios
+        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth axios
 
       - name: Create script
         run: |
           cat > download.js << 'EOF'
-          const puppeteer = require("puppeteer");
+          const puppeteer = require("puppeteer-extra");
+          const StealthPlugin = require("puppeteer-extra-plugin-stealth");
           const fs = require("fs");
           const path = require("path");
           const axios = require("axios");
           const { execSync } = require("child_process");
+
+          // افزودن پلاگین مخفی‌سازی
+          puppeteer.use(StealthPlugin());
 
           (async () => {
             const telegramLink = process.argv[2];
@@ -44,11 +49,16 @@ jobs:
               fs.mkdirSync(downloadsDir, { recursive: true });
             }
 
-            console.log("Launching browser (using system Chrome)");
+            console.log("Launching stealth browser");
             const browser = await puppeteer.launch({
               headless: true,
-              executablePath: '/usr/bin/google-chrome',   // ← کروم پیش‌فرض گیت‌هاب
-              args: ["--no-sandbox", "--disable-setuid-sandbox"]
+              executablePath: '/usr/bin/google-chrome',
+              args: [
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-blink-features=AutomationControlled",  // حذف ردّ خودکار بودن
+                "--disable-dev-shm-usage"
+              ]
             });
 
             try {
@@ -59,28 +69,54 @@ jobs:
               await page.setViewport({ width: 1366, height: 768 });
               page.setDefaultTimeout(90000);
 
+              // غیرفعال کردن خودکار بودن navigator.webdriver
+              await page.evaluateOnNewDocument(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+              });
+
               console.log("Opening site");
               await page.goto("https://telegramdownloader.net/", {
                 waitUntil: "domcontentloaded",
                 timeout: 90000
               });
+              // یک مکث کوتاه برای بارگذاری کامل
               await new Promise(r => setTimeout(r, 10000));
 
               console.log("Current URL:", page.url());
               console.log("Page title:", await page.title());
 
               console.log("Waiting for textbox");
-              await page.waitForFunction(() => document.querySelector("#ts-telegram-link") !== null, { timeout: 90000 });
+              await page.waitForSelector("#ts-telegram-link", { timeout: 90000 });
 
+              // پاک کردن فیلد و تایپ لینک (شبیه‌سازی واقعی‌تر)
               await page.focus("#ts-telegram-link");
-              await page.evaluate(() => { document.querySelector("#ts-telegram-link").value = ""; });
-              await page.type("#ts-telegram-link", telegramLink, { delay: 50 });
+              await page.evaluate(() => document.querySelector("#ts-telegram-link").value = "");
+              await page.type("#ts-telegram-link", telegramLink, { delay: 100 }); // delay بیشتر
 
               console.log("Click Download");
-              await page.evaluate(() => document.querySelector("#ts-download-btn").click());
+              await page.click("#ts-download-btn");
+              // صبر می‌کنیم تا نتیجه بیاید (یا دکمه یا خطا)
+              try {
+                // ابتدا منتظر دکمه مستقیم می‌مانیم
+                await page.waitForSelector(".ts-download-link-button", { timeout: 30000 });
+              } catch (btnError) {
+                // اگر دکمه ظاهر نشد، ممکن است خطای شبکه رخ داده باشد
+                console.log("Did not find direct link button in 30s. Checking for error message...");
+                const errorText = await page.evaluate(() => {
+                  const el = document.querySelector('.alert-danger, .error-message, .ts-error');
+                  return el ? el.innerText : null;
+                });
+                if (errorText) {
+                  console.log("Site error message:", errorText);
+                  throw new Error(`Site returned error: ${errorText}`);
+                } else {
+                  // اگر پیامی نبود، اسکرین‌شات بگیریم و خطا بدهیم
+                  await page.screenshot({ path: path.join(downloadsDir, "debug.png"), fullPage: true });
+                  throw new Error("Direct link button did not appear, no error message found. See debug.png");
+                }
+              }
 
-              console.log("Waiting for direct link button");
-              await page.waitForSelector(".ts-download-link-button", { timeout: 30000 });
+              // اگر به اینجا رسیدیم، دکمه پیدا شده است
               const href = await page.$eval(".ts-download-link-button", el => el.href);
               console.log("Direct page:", href);
 
@@ -174,12 +210,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # فقط اگر پوشه وجود دارد، آن را اضافه کن
           if [ -d Downloads ]; then
             git add Downloads/
           fi
-
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
