@@ -235,12 +235,37 @@ jobs:
               console.log("\n[Step 6] Clicking Download File button ...");
               const snapshot = fs.readdirSync(downloadsDir);
 
+              // Try normal click first
+              let clicked = false;
               try {
                 await page2.click("#download-btn");
+                clicked = true;
+                console.log("  ✓ Clicked via Puppeteer");
               } catch (clickErr) {
-                // If click fails (e.g. blocked by overlay), navigate directly
-                console.log("  Click failed, navigating to URL directly:", clickErr.message);
-                await page2.goto(downloadURL, { waitUntil: "domcontentloaded", timeout: 60000 });
+                console.log("  Puppeteer click failed:", clickErr.message);
+              }
+
+              // If normal click failed, force-click via page.evaluate (bypasses visibility checks)
+              if (!clicked) {
+                try {
+                  console.log("  Attempting DOM click via evaluate ...");
+                  await page2.evaluate(() => {
+                    const btn = document.querySelector("#download-btn");
+                    if (btn) btn.click();
+                  });
+                  clicked = true;
+                  console.log("  ✓ Clicked via DOM");
+                } catch (evalErr) {
+                  console.log("  DOM click failed:", evalErr.message);
+                }
+              }
+
+              // Last resort: navigate to download URL without waiting for page load
+              // (since it's a file download, not a page navigation)
+              if (!clicked) {
+                console.log("  Navigating to download URL directly (no wait) ...");
+                await page2.evaluate((url) => { window.location.href = url; }, downloadURL);
+                await sleep(2000); // Give it a moment to trigger
               }
 
               // ══════════════════════════════════════════════════════════════════
