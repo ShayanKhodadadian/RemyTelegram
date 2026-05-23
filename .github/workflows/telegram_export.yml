@@ -1,14 +1,14 @@
-name: Telegram Channel Export (Debug)
+name: Telegram Channel Export (Browser)
 
 on:
   workflow_dispatch:
     inputs:
       channel_name:
-        description: 'آدرس کانال (بدون @) مثلاً DeutschMahroo'
+        description: 'نام کانال (بدون @)'
         required: true
         default: 'DeutschMahroo'
       message_count:
-        description: 'تعداد پیام‌های اخیر برای دریافت'
+        description: 'تعداد پیام‌های اخیر'
         required: true
         default: '20'
 
@@ -18,152 +18,121 @@ permissions:
 jobs:
   export:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install dependencies
-        run: pip install requests beautifulsoup4
+      - name: Install Python dependencies
+        run: pip install playwright beautifulsoup4
 
-      - name: Run Telegram scraper (with debug logs)
+      - name: Install Playwright browsers
+        run: python -m playwright install chromium
+
+      - name: Scrape Telegram channel
         env:
           CHANNEL: ${{ github.event.inputs.channel_name }}
           COUNT: ${{ github.event.inputs.message_count }}
         run: |
           python << 'PYEOF'
-          import os, requests, time, json, datetime
+          import os, json, datetime, time
+          from playwright.sync_api import sync_playwright
           from bs4 import BeautifulSoup
 
           channel = os.environ['CHANNEL']
           count = int(os.environ['COUNT'])
-          base_url = f'https://t.me/s/{channel}'
-          headers = {
-              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-          }
+          url = f'https://t.me/s/{channel}'
 
           messages = []
-          current_url = base_url
 
-          print(f"🎯 Trying to fetch {count} messages from @{channel}")
-          print(f"🌐 Starting URL: {current_url}\n")
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              context = browser.new_context(
+                  user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+              )
+              page = context.new_page()
+              page.goto(url, timeout=30000)
 
-          while len(messages) < count:
-              resp = requests.get(current_url, headers=headers, timeout=15)
-              print(f"📡 Request to: {current_url}")
-              print(f"   Status Code: {resp.status_code}")
+              # منتظر می‌مانیم تا پیام‌ها ظاهر شوند
+              try:
+                  page.wait_for_selector('.tgme_widget_message_wrap', timeout=15000)
+              except:
+                  print("⚠️ پیام‌ها به‌موقع بارگذاری نشدند. صفحه ممکن است خالی باشد.")
+                  browser.close()
+                  exit(1)
 
-              if resp.status_code != 200:
-                  print(f"   ❌ Failed! Response content (first 200 chars): {resp.text[:200]}")
-                  break
+              # اسکرول برای دریافت تعداد مورد نیاز
+              previous_count = 0
+              while len(messages) < count:
+                  # هر بار HTML فعلی را می‌گیریم و پیام‌ها را استخراج می‌کنیم
+                  html = page.content()
+                  soup = BeautifulSoup(html, 'html.parser')
+                  wrappers = soup.select('.tgme_widget_message_wrap')
 
-              # نمایش بخشی از کد HTML برای عیب‌یابی
-              print(f"   📄 Page size: {len(resp.text)} chars")
-              # فقط 300 کاراکتر اول
-              snippet = resp.text[:300].replace('\n', ' ')
-              print(f"   📝 HTML snippet: {snippet} ...")
+                  for wrap in wrappers:
+                      msg_id_raw = wrap.get('data-post', '')
+                      if not msg_id_raw or '/' not in msg_id_raw:
+                          continue
+                      msg_id_num = msg_id_raw.split('/')[-1]
 
-              soup = BeautifulSoup(resp.text, 'html.parser')
+                      # جلوگیری از تکراری شدن پیام‌ها
+                      if any(m['message_id'] == int(msg_id_num) for m in messages):
+                          continue
 
-              # روش مقاوم‌تر: پیدا کردن هر div که data-post شبیه channel/123 دارد
-              msg_containers = soup.select('.tgme_widget_message_wrap')
-              fallback_containers = soup.select('div[data-post]')
-              
-              # اگر با کلاس اصلی چیزی پیدا نشد، از روش fallback استفاده کن
-              if not msg_containers and fallback_containers:
-                  print("   ⚠️ Standard class not found, using generic data-post selector.")
-                  # فیلتر آنهایی که حاوی "/" هستند
-                  msg_containers = [div for div in fallback_containers if '/' in div.get('data-post', '')]
-              
-              print(f"   📦 Found {len(msg_containers)} potential message containers")
+                      text_div = wrap.select_one('.tgme_widget_message_text')
+                      text = text_div.get_text(strip=True) if text_div else ""
 
-              if not msg_containers:
-                  print("   ❌ No message containers found. Stopping.")
-                  break
+                      file_info = None
+                      doc_wrap = wrap.select_one('.tgme_widget_message_document_wrap')
+                      if doc_wrap:
+                          file_link = doc_wrap.get('href')
+                          title_el = wrap.select_one('.tgme_widget_message_document_title')
+                          file_name = title_el.get_text(strip=True) if title_el else "unknown_file"
+                          file_info = {
+                              "file_name": file_name,
+                              "download_link": file_link or "not found"
+                          }
 
-              for container in msg_containers:
-                  if len(messages) >= count:
+                      messages.append({
+                          "message_id": int(msg_id_num),
+                          "text": text,
+                          "file": file_info,
+                          "message_link": f"https://t.me/{channel}/{msg_id_num}"
+                      })
+
+                      if len(messages) >= count:
+                          break
+
+                  # اگر تعداد پیام‌ها تغییری نکرد، یعنی به ته کانال رسیده‌ایم
+                  if len(messages) == previous_count:
                       break
+                  previous_count = len(messages)
 
-                  msg_id_raw = container.get('data-post', '')
-                  if not msg_id_raw or '/' not in msg_id_raw:
-                      continue
-                  msg_id_num = msg_id_raw.split('/')[-1]
+                  if len(messages) < count:
+                      # اسکرول به آخرین پیام برای بارگذاری بیشتر
+                      last_wrapper = page.query_selector('.tgme_widget_message_wrap:last-child')
+                      if last_wrapper:
+                          last_wrapper.scroll_into_view_if_needed()
+                          time.sleep(2)  # صبر برای لود شدن پیام‌های جدید
 
-                  # متن پیام
-                  text_div = container.select_one('.tgme_widget_message_text')
-                  text = text_div.get_text(strip=True) if text_div else ""
+              browser.close()
 
-                  # فایل پیوست (مانند PDF)
-                  file_info = None
-                  doc_wrap = container.select_one('.tgme_widget_message_document_wrap')
-                  if doc_wrap:
-                      # برخی نسخه‌ها لینک مستقیم داخل doc_wrap است، برخی دیگر در یک <a> کناری
-                      file_link = doc_wrap.get('href')
-                      if not file_link:
-                          # شاید لینک داخل یک تگ a باشد
-                          a_tag = doc_wrap.find('a')
-                          if a_tag:
-                              file_link = a_tag.get('href')
-                      title_el = container.select_one('.tgme_widget_message_document_title')
-                      file_name = title_el.get_text(strip=True) if title_el else "unknown_file"
-                      file_info = {
-                          "file_name": file_name,
-                          "download_link": file_link or "not found"
-                      }
-
-                  # لینک خود پیام
-                  message_link = f"https://t.me/{channel}/{msg_id_num}"
-
-                  messages.append({
-                      "message_id": int(msg_id_num),
-                      "text": text,
-                      "file": file_info,
-                      "message_link": message_link
-                  })
-
-              # رفتن به صفحه‌ی قدیمی‌تر
-              if msg_containers:
-                  last_msg = msg_containers[-1]
-                  last_id = last_msg.get('data-post', '').split('/')[-1]
-                  if last_id:
-                      current_url = f"{base_url}?before={last_id}"
-                  else:
-                      break
-              else:
-                  break
-
-              time.sleep(1.5)  # کمی بیشتر برای احتیاط
-
-          messages = messages[:count]
-          print(f"\n✅ Total messages collected: {len(messages)}")
-
-          # ساختن پوشه و فایل خروجی
+          # ذخیره‌سازی
           out_dir = "Telegram Export"
           os.makedirs(out_dir, exist_ok=True)
-
           timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-          filename = f"export_{timestamp}.json"
-          filepath = os.path.join(out_dir, filename)
+          filepath = os.path.join(out_dir, f"export_{timestamp}.json")
 
           with open(filepath, 'w', encoding='utf-8') as f:
-              json.dump(messages, f, ensure_ascii=False, indent=2)
+              json.dump(messages[:count], f, ensure_ascii=False, indent=2)
 
-          print(f"📁 Saved to {filepath}")
-
-          # اگر پیام‌ها خالی هستند، فایل لاگ جداگانه‌ای هم ذخیره کن
-          if not messages:
-              debug_file = os.path.join(out_dir, "debug_empty_response.txt")
-              with open(debug_file, 'w', encoding='utf-8') as dbg:
-                  dbg.write(f"URL: {base_url}\nResponse status: {resp.status_code}\n")
-                  dbg.write(f"Response text (first 1000 chars):\n{resp.text[:1000]}")
-              print(f"🐞 Debug info saved to {debug_file}")
+          print(f"✅ {len(messages[:count])} پیام در {filepath} ذخیره شد.")
           PYEOF
 
       - name: Commit and push results
@@ -171,4 +140,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add "Telegram Export/"
-          git diff --staged --quiet || (git commit -m "📤 Export + debug info for ${{ github.event.inputs.channel_name }}" && git push)
+          git diff --staged --quiet || (git commit -m "📤 Export Telegram messages for ${{ github.event.inputs.channel_name }}" && git push)
