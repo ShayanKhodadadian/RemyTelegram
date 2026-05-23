@@ -1,0 +1,15 @@
+URL: https://t.me/s/DeutschMahroo
+Response status: 200
+Response text (first 1000 chars):
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Telegram: View @DeutschMahroo</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script>location.hash=''</script>
+    <script>try{if(window.parent!=null&&window!=window.parent){window.parent.postMessage(JSON.stringify({eventType:'web_app_open_tg_link',eventData:{path_full:"\/DeutschMahroo"}}),'https://web.telegram.org');}}catch(e){}</script>
+    <meta property="og:title" content="Deutsch mit Mahroo 🦩 آلمانی با مَهرو">
+<meta property="og:image" content="https://cdn4.telesco.pe/file/pJ5UBMMEHjHglKZlj3fLhA_7u_0K7ucdsladuV79QCj9RUzIFtH1RBLDjFFWdjYHenqS73IzLQsYq8DbWxp2UEY5YLEOnAb7iulIQEAnrelFUSMYIV9klI4tzS5ITPNZ1dtqiR4PSYz1IHSxgIIjPavzNmXAnhb5XAyDIYHxxrtFVWSw-cNM9lhVUv4F8-465hwpcegEoNQd3UjMwI8NblYLgmXXJhTk6cxUM_uUf1IpKQ7nMqVQZIxH0dzXei6oo2Zvo3KiYl9dJGBHQdnl7XWkb1BBleuYYPzgxX-81KPkXo3K1O5gTweexWqP57PPy2SqerBBxy6OQyozB_oVtw.jpg">
+<meta property="og:site_name" content="Telegram">
+<meta pr
