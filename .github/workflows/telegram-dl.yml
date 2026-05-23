@@ -31,7 +31,7 @@ jobs:
           sudo apt-get install -y google-chrome-stable
 
       - name: Install npm packages
-        run: npm install puppeteer-extra puppeteer-extra-plugin-stealth
+        run: npm install puppeteer-core puppeteer-extra puppeteer-extra-plugin-stealth
 
       - name: Create download script
         run: |
