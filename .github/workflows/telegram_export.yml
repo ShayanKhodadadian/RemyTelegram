@@ -33,161 +33,101 @@ jobs:
       - name: Install Chromium browser for Playwright
         run: python -m playwright install chromium --with-deps
 
-      - name: Scrape Telegram channel
+      - name: Scrape Telegram channel (HTTP)
         id: scrape
         env:
           CHANNEL: ${{ github.event.inputs.channel_name }}
           COUNT: ${{ github.event.inputs.message_count }}
         run: |
           python << 'PYEOF'
-          import os, sys, json, datetime, time, traceback
-          from playwright.sync_api import sync_playwright, TimeoutError
-          from playwright_stealth import stealth_sync
+          import os, sys, json, datetime, requests, re, time
           from bs4 import BeautifulSoup
 
           channel = os.environ['CHANNEL']
           count = int(os.environ['COUNT'])
-          url = f'https://t.me/s/{channel}'
+          base_url = f'https://t.me/s/{channel}'
 
           out_dir = "Telegram Export"
           os.makedirs(out_dir, exist_ok=True)
 
-          # مسیرهای ثابت برای اسکرین‌شات‌ها
-          screenshot_initial = os.path.join(out_dir, "screenshot_initial.png")
-          screenshot_final   = os.path.join(out_dir, "screenshot_final.png")
-          screenshot_error   = os.path.join(out_dir, "screenshot_error.png")
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+              'Accept-Language': 'en-US,en;q=0.9',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+          }
 
           messages = []
+          seen_ids = set()
           error_occurred = False
-          page = None
-          browser = None
+          next_url = base_url
 
-          try:
-              with sync_playwright() as p:
-                  browser = p.chromium.launch(
-                      headless=True,
-                      args=[
-                          '--no-sandbox',
-                          '--disable-setuid-sandbox',
-                          '--disable-blink-features=AutomationControlled'
-                      ]
-                  )
-                  context = browser.new_context(
-                      viewport={'width': 1280, 'height': 800},
-                      locale='en-US'
-                  )
-                  page = context.new_page()
-                  stealth_sync(page)
-
-                  print(f"🌐 رفتن به {url}")
-                  page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                  page.wait_for_timeout(8000)
-
-                  # اسکرین‌شات اولیه – همیشه ذخیره شود
-                  page.screenshot(path=screenshot_initial)
-                  print(f"📸 اسکرین‌شات اولیه در {screenshot_initial} ذخیره شد.")
-
-                  # اگر صفحه پیش‌نمایش آمد، دوباره تلاش کن
-                  if 'VIEW IN TELEGRAM' in page.content():
-                      print("⚠️ صفحه پیش‌نمایش – تلاش دوباره با user-agent جدید...")
-                      page.screenshot(path=screenshot_error)  # ذخیره وضعیت پیش‌نمایش
-                      context.close()
-                      context = browser.new_context(
-                          user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                          viewport={'width': 1280, 'height': 800},
-                          locale='en-US'
-                      )
-                      page = context.new_page()
-                      stealth_sync(page)
-                      page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                      page.wait_for_timeout(8000)
-                      # اسکرین‌شات بعد از تلاش مجدد
-                      page.screenshot(path=screenshot_initial)  # بازنویسی اسکرین‌شات اولیه
-
-                  if 'VIEW IN TELEGRAM' in page.content():
-                      print("❌ همچنان صفحه پیش‌نمایش – دسترسی ناموفق.")
-                      page.screenshot(path=screenshot_error)
-                      error_occurred = True
-                  else:
-                      try:
-                          page.wait_for_selector('.tgme_widget_message_wrap', timeout=15000)
-                          print("✅ پیام‌ها بارگذاری شدند.")
-                      except TimeoutError:
-                          print("⏰ پیام‌ها پیدا نشدند.")
-                          page.screenshot(path=screenshot_error)
-                          error_occurred = True
-
-                  if not error_occurred:
-                      previous_count = 0
-                      retry_scroll = 0
-                      while len(messages) < count and retry_scroll < 10:
-                          html = page.content()
-                          soup = BeautifulSoup(html, 'html.parser')
-                          wrappers = soup.select('.tgme_widget_message_wrap')
-                          if not wrappers:
-                              break
-
-                          for wrap in wrappers:
-                              if len(messages) >= count:
-                                  break
-                              msg_id_raw = wrap.get('data-post', '')
-                              if not msg_id_raw or '/' not in msg_id_raw:
-                                  continue
-                              msg_id_num = msg_id_raw.split('/')[-1]
-                              if any(m['message_id'] == int(msg_id_num) for m in messages):
-                                  continue
-
-                              text_div = wrap.select_one('.tgme_widget_message_text')
-                              text = text_div.get_text(strip=True) if text_div else ""
-
-                              file_info = None
-                              doc_wrap = wrap.select_one('.tgme_widget_message_document_wrap')
-                              if doc_wrap:
-                                  file_link = doc_wrap.get('href')
-                                  title_el = wrap.select_one('.tgme_widget_message_document_title')
-                                  file_name = title_el.get_text(strip=True) if title_el else "unknown_file"
-                                  file_info = {
-                                      "file_name": file_name,
-                                      "download_link": file_link or "not found"
-                                  }
-
-                              messages.append({
-                                  "message_id": int(msg_id_num),
-                                  "text": text,
-                                  "file": file_info,
-                                  "message_link": f"https://t.me/{channel}/{msg_id_num}"
-                              })
-
-                          if len(messages) == previous_count:
-                              retry_scroll += 1
-                          else:
-                              retry_scroll = 0
-                          previous_count = len(messages)
-
-                          if len(messages) < count:
-                              page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
-                              time.sleep(3)
-
-                      # اسکرین‌شات نهایی (تمام‌صفحه)
-                      page.screenshot(path=screenshot_final, full_page=True)
-                      print(f"📸 اسکرین‌شات نهایی در {screenshot_final} ذخیره شد. {len(messages)} پیام استخراج شد.")
-
-                  if browser:
-                      browser.close()
-
-          except Exception as e:
-              print(f"🔥 خطا: {e}")
-              traceback.print_exc()
-              error_occurred = True
-              # سعی کن از صفحه فعلی اسکرین‌شات بگیری (اگر page هنوز زنده باشه)
+          while len(messages) < count and next_url:
+              print(f"📡 دریافت صفحه: {next_url}")
               try:
-                  if page:
-                      page.screenshot(path=screenshot_error)
-                      print(f"⚠️ اسکرین‌شات خطا در {screenshot_error} ذخیره شد.")
-              except:
-                  print("نتوانستیم اسکرین‌شات خطا بگیریم.")
+                  resp = requests.get(next_url, headers=headers, timeout=15)
+                  resp.raise_for_status()
+              except Exception as e:
+                  print(f"❌ خطا در دریافت صفحه: {e}")
+                  error_occurred = True
+                  break
 
-          # ذخیره داده‌ها
+              soup = BeautifulSoup(resp.text, 'html.parser')
+              wrappers = soup.select('.tgme_widget_message_wrap')
+              if not wrappers:
+                  print("⚠️ هیچ پیامی در صفحه پیدا نشد (ممکن است صفحه پیش‌نمایش باشد).")
+                  # می‌توانید محتوای صفحه را برای بررسی ذخیره کنید
+                  with open(os.path.join(out_dir, "preview.html"), 'w', encoding='utf-8') as f:
+                      f.write(resp.text)
+                  error_occurred = True
+                  break
+
+              for wrap in wrappers:
+                  if len(messages) >= count:
+                      break
+                  data_post = wrap.get('data-post')
+                  if not data_post or '/' not in data_post:
+                      continue
+                  msg_id_str = data_post.split('/')[-1]
+                  try:
+                      msg_id = int(msg_id_str)
+                  except ValueError:
+                      continue
+                  if msg_id in seen_ids:
+                      continue
+                  seen_ids.add(msg_id)
+
+                  text_div = wrap.select_one('.tgme_widget_message_text')
+                  text = text_div.get_text(strip=True) if text_div else ""
+
+                  file_info = None
+                  doc_wrap = wrap.select_one('.tgme_widget_message_document_wrap')
+                  if doc_wrap:
+                      file_link = doc_wrap.get('href')
+                      title_el = wrap.select_one('.tgme_widget_message_document_title')
+                      file_name = title_el.get_text(strip=True) if title_el else "unknown_file"
+                      file_info = {
+                          "file_name": file_name,
+                          "download_link": file_link or "not found"
+                      }
+
+                  messages.append({
+                      "message_id": msg_id,
+                      "text": text,
+                      "file": file_info,
+                      "message_link": f"https://t.me/{channel}/{msg_id}"
+                  })
+
+              # پیدا کردن لینک "Load earlier messages" برای صفحه‌بندی
+              if len(messages) < count:
+                  more_link = soup.select_one('a.tme_messages_more')
+                  if more_link and more_link.get('href'):
+                      next_url = more_link['href']
+                      if not next_url.startswith('http'):
+                          next_url = f'https://t.me{next_url}'
+                      time.sleep(1)  # احترام به سرور
+                  else:
+                      next_url = None
+
           timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
           filepath = os.path.join(out_dir, f"export_{timestamp}.json")
           export_data = {
@@ -201,7 +141,7 @@ jobs:
           with open(filepath, 'w', encoding='utf-8') as f:
               json.dump(export_data, f, ensure_ascii=False, indent=2)
 
-          print(f"✅ فایل JSON ذخیره شد: {filepath}")
+          print(f"✅ {len(messages)} پیام استخراج و در {filepath} ذخیره شد.")
           if error_occurred:
               sys.exit(1)
           PYEOF
