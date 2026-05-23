@@ -1,5 +1,7 @@
 {
     "github-actions.workflows.pinned.workflows": [
-        ".github/workflows/telegram_downloader.yml"
+        ".github/workflows/telegram_downloader.yml",
+        ".github/workflows/telegram_export.yml",
+        ".github/workflows/telegram-dl.yml"
     ]
 }
