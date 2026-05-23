@@ -33,29 +33,6 @@ jobs:
           const path = require('path');
           const { execSync } = require('child_process');
 
-          // تابع کلیک روی یک المنت با چند XPath مختلف (تلاش متوالی)
-          async function clickWhenAnyXPath(page, xpaths, timeoutMs = 10000) {
-            const start = Date.now();
-            while (Date.now() - start < timeoutMs) {
-              for (const xpath of xpaths) {
-                try {
-                  // استفاده از waitForSelector با پیشوند xpath/
-                  await page.waitForSelector(`xpath/${xpath}`, { visible: true, timeout: Math.min(2000, timeoutMs) });
-                  const elements = await page.$x(xpath); // $x هنوز در این نسخه کار می‌کند
-                  if (elements.length > 0) {
-                    await elements[0].click();
-                    console.log(`Clicked: ${xpath}`);
-                    return true;
-                  }
-                } catch (e) {
-                  // اگر این XPath پیدا نشد، به بعدی برو
-                }
-              }
-              await new Promise(r => setTimeout(r, 500));
-            }
-            return false;
-          }
-
           (async () => {
             const telegramLink = process.argv[2];
             if (!telegramLink) {
@@ -79,51 +56,30 @@ jobs:
                 timeout: 30000
               });
               await new Promise(r => setTimeout(r, 3000));
-              await page.screenshot({ path: 'page_loaded.png' });
 
-              // پر کردن فیلد ورودی
+              // پر کردن فیلد
               console.log('Filling input field...');
               await page.waitForSelector('#ts-telegram-link', { visible: true, timeout: 15000 });
               await page.type('#ts-telegram-link', telegramLink);
               console.log('Link pasted.');
 
-              // کلیک روی دکمهٔ Download با چند XPath جایگزین
-              console.log('Clicking the Download button...');
-              const downloadClicked = await clickWhenAnyXPath(page, [
-                "//button[contains(text(), 'Download')]",
-                "//input[@type='submit'][contains(@value, 'Download')]",
-                "//a[contains(text(), 'Download')]",
-                "//button[contains(@class, 'download')]",
-                "//form//button",
-                "//form//input[@type='submit']"
-              ], 15000);
-
-              if (!downloadClicked) {
-                await page.screenshot({ path: 'download_button_not_found.png' });
-                throw new Error('Download button not found.');
-              }
-
-              // صبر برای دکمهٔ Get Direct Download Link
-              console.log('Waiting for "Get Direct Download Link"...');
-              const getDirectClicked = await clickWhenAnyXPath(page, [
-                "//a[contains(text(), 'Get Direct Download Link')]"
-              ], 25000);
-
-              if (!getDirectClicked) {
-                await page.screenshot({ path: 'getdirect_not_found.png' });
-                throw new Error('"Get Direct Download Link" button not found.');
-              }
+              // صبر برای دکمهٔ «Get Direct Download Link» (همون که قبلاً اشتباهی بهش می‌گفتم مرحلهٔ دوم)
+              console.log('Waiting for "Get Direct Download Link" button...');
+              const getDirectXPath = "//a[contains(text(), 'Get Direct Download Link')]";
+              await page.waitForSelector(`xpath/${getDirectXPath}`, { visible: true, timeout: 25000 });
+              console.log('Button found, clicking...');
+              await page.click(`xpath/${getDirectXPath}`);
 
               // پیمایش به صفحهٔ تایمر
               await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => {});
               console.log('Current URL:', page.url());
 
-              // صبر برای دکمهٔ نهایی #download-btn
-              console.log('Waiting for final download button...');
+              // منتظر دکمهٔ نهایی «Download File» با ID مشخص
+              console.log('Waiting for final "Download File" button...');
               await page.waitForSelector('#download-btn', { visible: true, timeout: 25000 });
               await page.click('#download-btn');
 
-              // پیمایش به دامنهٔ دانلود
+              // پیمایش به دامنهٔ دانلود مستقیم
               await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 30000 }).catch(() => {});
               const downloadUrl = page.url();
               console.log('Final download URL:', downloadUrl);
@@ -134,7 +90,7 @@ jobs:
               await browser.close();
               console.log('Browser closed.');
 
-              // دانلود فایل
+              // دانلود فایل با fetch
               console.log('Starting file download...');
               const res = await fetch(downloadUrl, { redirect: 'follow' });
               if (!res.ok) throw new Error(`Download failed: ${res.status}`);
@@ -164,7 +120,7 @@ jobs:
               });
               console.log('File saved.');
 
-              // تقسیم فایل اگر بزرگتر از ۴۵ مگابایت
+              // تقسیم در صورت بزرگ‌تر از ۴۵ مگابایت
               const stats = fs.statSync(filename);
               const maxSize = 45 * 1024 * 1024;
               const downloadsDir = 'Downloads';
