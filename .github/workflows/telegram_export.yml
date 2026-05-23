@@ -28,7 +28,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install Playwright browser
-        uses: microsoft/playwright@v1
+        uses: microsoft/playwright-github-action@v1
         with:
           browsers: 'chromium'
 
@@ -73,16 +73,15 @@ jobs:
                   )
                   page = context.new_page()
 
-                  # مخفی‌سازی کامل
+                  # مخفی‌سازی کامل برای رد نشدن توسط تلگرام
                   stealth_sync(page)
 
                   print(f"🌐 رفتن به {url}")
                   page.goto(url, wait_until='domcontentloaded', timeout=30000)
                   page.wait_for_timeout(8000)
 
-                  # اگر باز هم صفحه پیش‌نمایش آمد، یک بار دیگر با user-agent جدید تلاش کن
                   if 'VIEW IN TELEGRAM' in page.content():
-                      print("⚠️ صفحه پیش‌نمایش تشخیص داده شد. تلاش مجدد...")
+                      print("⚠️ صفحه پیش‌نمایش. تلاش دوباره با user-agent جدید...")
                       context.close()
                       context = browser.new_context(
                           user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -94,18 +93,17 @@ jobs:
                       page.goto(url, wait_until='domcontentloaded', timeout=30000)
                       page.wait_for_timeout(8000)
 
-                  # اسکرین‌شات برای بررسی
                   page.screenshot(path=os.path.join(out_dir, "debug_initial.png"))
 
                   if 'VIEW IN TELEGRAM' in page.content():
-                      print("❌ همچنان صفحه پیش‌نمایش است. تلگرام مسدود کرده.")
+                      print("❌ هنوز صفحه پیش‌نمایش است.")
                       error_occurred = True
                   else:
                       try:
                           page.wait_for_selector('.tgme_widget_message_wrap', timeout=15000)
-                          print("✅ پیام‌ها پیدا شدند.")
+                          print("✅ پیام‌ها لود شدند.")
                       except TimeoutError:
-                          print("⏰ پیام‌ها بارگذاری نشدند.")
+                          print("⏰ پیام‌ها ظاهر نشدند.")
                           page.screenshot(path=os.path.join(out_dir, "debug_error.png"))
                           error_occurred = True
 
@@ -161,7 +159,7 @@ jobs:
                               time.sleep(3)
 
                       page.screenshot(path=os.path.join(out_dir, "debug_final.png"))
-                      print(f"📸 اسکرین‌شات نهایی گرفته شد. {len(messages)} پیام استخراج شد.")
+                      print(f"📸 {len(messages)} پیام استخراج شد.")
 
                   browser.close()
 
@@ -174,7 +172,6 @@ jobs:
               except:
                   pass
 
-          # ذخیره خروجی
           timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
           filepath = os.path.join(out_dir, f"export_{timestamp}.json")
           export_data = {
