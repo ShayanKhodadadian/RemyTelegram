@@ -1,4 +1,4 @@
-name: Telegram Channel Export (Reliable)
+name: Telegram Channel Export (Fixed)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ on:
       message_count:
         description: 'تعداد پیام‌های اخیر'
         required: true
-        default: '20'
+        default: '30'
 
 permissions:
   contents: write
@@ -27,13 +27,14 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Playwright (browser + dependencies)
+      - name: Install Playwright (browsers + dependencies)
         uses: microsoft/playwright@v1
         with:
           browsers: 'chromium'
 
-      - name: Install Python dependencies
-        run: pip install beautifulsoup4
+      - name: Install Python packages
+        run: |
+          pip install beautifulsoup4 playwright-stealth
 
       - name: Scrape Telegram channel
         id: scrape
@@ -44,6 +45,7 @@ jobs:
           python << 'PYEOF'
           import os, sys, json, datetime, time
           from playwright.sync_api import sync_playwright, TimeoutError
+          from playwright_stealth import stealth_sync
           from bs4 import BeautifulSoup
 
           channel = os.environ['CHANNEL']
@@ -53,10 +55,6 @@ jobs:
           out_dir = "Telegram Export"
           os.makedirs(out_dir, exist_ok=True)
 
-          screenshot_initial = os.path.join(out_dir, "debug_initial.png")
-          screenshot_error   = os.path.join(out_dir, "debug_error.png")
-          screenshot_final   = os.path.join(out_dir, "debug_final.png")
-
           messages = []
           error_occurred = False
 
@@ -64,47 +62,60 @@ jobs:
               with sync_playwright() as p:
                   browser = p.chromium.launch(
                       headless=True,
-                      args=['--no-sandbox', '--disable-setuid-sandbox']
+                      args=[
+                          '--no-sandbox',
+                          '--disable-setuid-sandbox',
+                          '--disable-blink-features=AutomationControlled'
+                      ]
                   )
                   context = browser.new_context(
-                      user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
                       viewport={'width': 1280, 'height': 800},
                       locale='en-US'
                   )
-
-                  # پنهان‌سازی پرچم webdriver (ساده و مؤثر)
-                  context.add_init_script("""
-                      try {
-                          Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                      } catch (e) {}
-                  """)
-
                   page = context.new_page()
+
+                  # اعمال تنظیمات مخفی‌سازی با playwright-stealth
+                  stealth_sync(page)
+
                   print(f"🌐 رفتن به {url}")
                   page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                  page.wait_for_timeout(5000)  # صبر برای بارگذاری کامل JS
+                  # صبر برای بارگذاری کامل جاوااسکریپت (کمی بیشتر)
+                  page.wait_for_timeout(8000)
 
-                  # اسکرین‌شات اولیه
-                  page.screenshot(path=screenshot_initial)
-                  print(f"📸 اسکرین‌شات اولیه ذخیره شد: {screenshot_initial}")
-
-                  # بررسی: آیا صفحه پیش‌نمایش است؟
+                  # اگر هنوز پیش‌نمایش نمایش داده می‌شود، دوباره امتحان کن
                   if 'VIEW IN TELEGRAM' in page.content():
-                      print("⚠️  صفحه پیش‌نمایش دریافت شد (ربات تشخیص داده شد).")
+                      print("⚠️  صفحه پیش‌نمایش. شاید نیاز به کوکی یا user-agent جدید باشد.")
+                      # بارگذاری مجدد با user-agent جدید
+                      context.close()
+                      context = browser.new_context(
+                          user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                          viewport={'width': 1280, 'height': 800},
+                          locale='en-US'
+                      )
+                      page = context.new_page()
+                      stealth_sync(page)
+                      page.goto(url, wait_until='domcontentloaded', timeout=30000)
+                      page.wait_for_timeout(8000)
+
+                  # اسکرین‌شات برای بررسی
+                  page.screenshot(path=os.path.join(out_dir, "debug_initial.png"))
+
+                  if 'VIEW IN TELEGRAM' in page.content():
+                      print("❌ هنوز هم صفحه پیش‌نمایش است. تلگرام دسترسی را مسدود کرده.")
                       error_occurred = True
                   else:
                       try:
                           page.wait_for_selector('.tgme_widget_message_wrap', timeout=15000)
-                          print("✅ محفظه‌های پیام پیدا شدند.")
+                          print("✅ پیام‌ها لود شدند.")
                       except TimeoutError:
                           print("⏰ پیام‌ها ظاهر نشدند.")
-                          page.screenshot(path=screenshot_error)
+                          page.screenshot(path=os.path.join(out_dir, "debug_error.png"))
                           error_occurred = True
 
                   if not error_occurred:
-                      # استخراج پیام‌ها
                       previous_count = 0
-                      while len(messages) < count:
+                      retry_scroll = 0
+                      while len(messages) < count and retry_scroll < 10:
                           html = page.content()
                           soup = BeautifulSoup(html, 'html.parser')
                           wrappers = soup.select('.tgme_widget_message_wrap')
@@ -143,22 +154,23 @@ jobs:
                               })
 
                           if len(messages) == previous_count:
-                              break
+                              retry_scroll += 1
+                          else:
+                              retry_scroll = 0
                           previous_count = len(messages)
 
                           if len(messages) < count:
-                              last_wrapper = page.query_selector('.tgme_widget_message_wrap:last-child')
-                              if last_wrapper:
-                                  last_wrapper.scroll_into_view_if_needed()
-                                  time.sleep(2)
+                              # اسکرول به پایین صفحه با جاوااسکریپت
+                              page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
+                              time.sleep(3)
 
-                      page.screenshot(path=screenshot_final)
-                      print(f"📸 اسکرین‌شات نهایی ذخیره شد: {screenshot_final}")
+                      page.screenshot(path=os.path.join(out_dir, "debug_final.png"))
+                      print(f"📸 اسکرین‌شات نهایی گرفته شد.")
 
                   browser.close()
 
           except Exception as e:
-              print(f"🔥 خطای غیرمنتظره: {e}")
+              print(f"🔥 خطا: {e}")
               error_occurred = True
               try:
                   if 'page' in locals():
@@ -166,7 +178,7 @@ jobs:
               except:
                   pass
 
-          # ذخیره JSON (حتی اگر خطا رخ داده باشد)
+          # ذخیره خروجی (چه خطا چه موفق)
           timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
           filepath = os.path.join(out_dir, f"export_{timestamp}.json")
           export_data = {
@@ -180,21 +192,20 @@ jobs:
           with open(filepath, 'w', encoding='utf-8') as f:
               json.dump(export_data, f, ensure_ascii=False, indent=2)
 
-          print(f"✅ داده‌ها در {filepath} ذخیره شدند.")
+          print(f"✅ فایل ذخیره شد: {filepath}")
           if error_occurred:
-              print("❗ به‌دلیل وجود خطا، مرحله با شکست مواجه می‌شود.")
               sys.exit(1)
           PYEOF
 
-      - name: Commit and push results (always)
+      - name: Commit and push results
         if: always()
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add "Telegram Export/"
           if git diff --staged --quiet; then
-            echo "No changes to commit."
+            echo "No changes."
           else
-            git commit -m "📤 Export + screenshots for ${{ github.event.inputs.channel_name }}"
+            git commit -m "📤 Export for ${{ github.event.inputs.channel_name }}"
             git push
           fi
