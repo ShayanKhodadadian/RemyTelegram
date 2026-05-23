@@ -1,4 +1,4 @@
-name: Telegram Channel Export (Stealth)
+name: Telegram Channel Export (Simple & Fast)
 
 on:
   workflow_dispatch:
@@ -18,8 +18,6 @@ permissions:
 jobs:
   export:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -29,191 +27,130 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install system dependencies for Chromium
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 libnspr4 libatk1.0-0t64 libatk-bridge2.0-0t64 \
-            libcups2t64 libdrm2 libdbus-1-3 libxkbcommon0 \
-            libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-            libgbm1 libpango-1.0-0 libcairo2 libasound2t64
+      - name: Install dependencies
+        run: pip install requests beautifulsoup4
 
-      - name: Install Python dependencies
-        run: pip install playwright beautifulsoup4
-
-      - name: Install Playwright Chromium browser
-        run: python -m playwright install chromium
-
-      - name: Scrape Telegram channel (stealth mode)
-        id: scrape
+      - name: Export Telegram messages
         env:
           CHANNEL: ${{ github.event.inputs.channel_name }}
           COUNT: ${{ github.event.inputs.message_count }}
         run: |
           python << 'PYEOF'
           import os, json, datetime, time, sys
-          from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+          import requests
           from bs4 import BeautifulSoup
 
           channel = os.environ['CHANNEL']
           count = int(os.environ['COUNT'])
           url = f'https://t.me/s/{channel}'
 
-          out_dir = "Telegram Export"
-          os.makedirs(out_dir, exist_ok=True)
-
-          screenshot_initial = os.path.join(out_dir, "debug_initial.png")
-          screenshot_error   = os.path.join(out_dir, "debug_error.png")
-          screenshot_final   = os.path.join(out_dir, "debug_final.png")
-          screenshot_unexp   = os.path.join(out_dir, "debug_unexpected.png")
+          # هدرهایی که تلگرام را مجاب می‌کنند محتوای کامل را برگرداند
+          headers = {
+              'User-Agent': 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)',
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.5',
+          }
 
           messages = []
+          current_url = url
+          errors = []
 
-          try:
-              with sync_playwright() as p:
-                  browser = p.chromium.launch(
-                      headless=True,
-                      args=['--no-sandbox', '--disable-setuid-sandbox']
-                  )
-                  context = browser.new_context(
-                      user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                      viewport={'width': 1280, 'height': 800},
-                      bypass_csp=True,
-                      locale='en-US'
-                  )
-
-                  # پنهان‌سازی navigator.webdriver و دیگر نشانه‌های headless
-                  context.add_init_script("""
-                      Object.defineProperty(navigator, 'webdriver', {
-                          get: () => undefined
-                      });
-                      // جلوگیری از تشخیص true بودن webdriver
-                      const originalQuery = window.navigator.permissions.query;
-                      window.navigator.permissions.query = (parameters) => (
-                          parameters.name === 'notifications' ?
-                          Promise.resolve({ state: Notification.permission }) :
-                          originalQuery(parameters)
-                      );
-                      // پوشاندن سایر مشخصه‌های خودکار
-                      Object.defineProperty(navigator, 'plugins', {
-                          get: () => [1, 2, 3, 4, 5]
-                      });
-                      Object.defineProperty(navigator, 'languages', {
-                          get: () => ['en-US', 'en']
-                      });
-                  """)
-
-                  page = context.new_page()
-                  print(f"🌐 رفتن به آدرس: {url}")
-                  page.goto(url, timeout=30000, wait_until='domcontentloaded')
-                  # صبر اضافی برای بارگذاری کامل پیام‌ها
-                  page.wait_for_timeout(3000)
-                  print(f"📄 عنوان صفحه: {page.title()}")
-
-                  page.screenshot(path=screenshot_initial)
-                  print(f"📸 اسکرین‌شات اولیه ذخیره شد: {screenshot_initial}")
-
-                  # انتظار برای ظاهر شدن پیام‌ها
-                  try:
-                      page.wait_for_selector('.tgme_widget_message_wrap', timeout=25000)
-                      print("✅ پیام‌ها ظاهر شدند.")
-                  except PlaywrightTimeout:
-                      print("⏰ پیام‌ها بارگذاری نشدند. ذخیره اسکرین‌شات خطا...")
-                      page.screenshot(path=screenshot_error)
-                      print(f"❌ اسکرین‌شات خطا: {screenshot_error}")
-                      browser.close()
-                      sys.exit(1)
-
-                  # استخراج پیام‌ها
-                  previous_count = 0
-                  while len(messages) < count:
-                      html = page.content()
-                      soup = BeautifulSoup(html, 'html.parser')
-                      wrappers = soup.select('.tgme_widget_message_wrap')
-
-                      for wrap in wrappers:
-                          msg_id_raw = wrap.get('data-post', '')
-                          if not msg_id_raw or '/' not in msg_id_raw:
-                              continue
-                          msg_id_num = msg_id_raw.split('/')[-1]
-
-                          if any(m['message_id'] == int(msg_id_num) for m in messages):
-                              continue
-
-                          text_div = wrap.select_one('.tgme_widget_message_text')
-                          text = text_div.get_text(strip=True) if text_div else ""
-
-                          file_info = None
-                          doc_wrap = wrap.select_one('.tgme_widget_message_document_wrap')
-                          if doc_wrap:
-                              file_link = doc_wrap.get('href')
-                              title_el = wrap.select_one('.tgme_widget_message_document_title')
-                              file_name = title_el.get_text(strip=True) if title_el else "unknown_file"
-                              file_info = {
-                                  "file_name": file_name,
-                                  "download_link": file_link or "not found"
-                              }
-
-                          messages.append({
-                              "message_id": int(msg_id_num),
-                              "text": text,
-                              "file": file_info,
-                              "message_link": f"https://t.me/{channel}/{msg_id_num}"
-                          })
-
-                          if len(messages) >= count:
-                              break
-
-                      if len(messages) == previous_count:
-                          print("ℹ️  پیام جدیدی بارگذاری نشد (اتمام یا خطا). توقف.")
-                          break
-                      previous_count = len(messages)
-
-                      if len(messages) < count:
-                          last_wrapper = page.query_selector('.tgme_widget_message_wrap:last-child')
-                          if last_wrapper:
-                              last_wrapper.scroll_into_view_if_needed()
-                              time.sleep(2.5)
-
-                  page.screenshot(path=screenshot_final)
-                  print(f"📸 اسکرین‌شات نهایی: {screenshot_final}")
-                  browser.close()
-
-          except Exception as e:
-              print(f"🔥 خطای غیرمنتظره: {e}")
+          while len(messages) < count:
               try:
-                  if 'page' in locals():
-                      page.screenshot(path=screenshot_unexp)
-                      print(f"📸 اسکرین‌شات خطای غیرمنتظره: {screenshot_unexp}")
-              except:
-                  pass
-              sys.exit(1)
+                  resp = requests.get(current_url, headers=headers, timeout=15)
+                  if resp.status_code != 200:
+                      errors.append(f"Status {resp.status_code} at {current_url}")
+                      break
+              except Exception as e:
+                  errors.append(f"Request error: {e}")
+                  break
 
-          # ذخیره JSON
+              soup = BeautifulSoup(resp.text, 'html.parser')
+              wrappers = soup.select('.tgme_widget_message_wrap')
+
+              if not wrappers:
+                  # شاید صفحه پیش‌نمایش باشد
+                  if 'VIEW IN TELEGRAM' in resp.text:
+                      errors.append("Got preview page, not messages list. Maybe the channel is private or blocked?")
+                  else:
+                      errors.append("No message containers found. HTML structure changed?")
+                  break
+
+              for wrap in wrappers:
+                  if len(messages) >= count:
+                      break
+                  msg_id_raw = wrap.get('data-post', '')
+                  if not msg_id_raw or '/' not in msg_id_raw:
+                      continue
+                  msg_id_num = msg_id_raw.split('/')[-1]
+
+                  # جلوگیری از تکراری
+                  if any(m['message_id'] == int(msg_id_num) for m in messages):
+                      continue
+
+                  text_div = wrap.select_one('.tgme_widget_message_text')
+                  text = text_div.get_text(strip=True) if text_div else ""
+
+                  file_info = None
+                  doc_wrap = wrap.select_one('.tgme_widget_message_document_wrap')
+                  if doc_wrap:
+                      file_link = doc_wrap.get('href')
+                      title_el = wrap.select_one('.tgme_widget_message_document_title')
+                      file_name = title_el.get_text(strip=True) if title_el else "unknown_file"
+                      file_info = {
+                          "file_name": file_name,
+                          "download_link": file_link or "not found"
+                      }
+
+                  messages.append({
+                      "message_id": int(msg_id_num),
+                      "text": text,
+                      "file": file_info,
+                      "message_link": f"https://t.me/{channel}/{msg_id_num}"
+                  })
+
+              # صفحه‌ی بعد
+              if wrappers and len(messages) < count:
+                  last_id = wrappers[-1].get('data-post', '').split('/')[-1]
+                  if last_id:
+                      current_url = f"{url}?before={last_id}"
+                      time.sleep(1)
+                  else:
+                      break
+              else:
+                  break
+
+          # ذخیره خروجی
+          out_dir = "Telegram Export"
+          os.makedirs(out_dir, exist_ok=True)
           timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
           filepath = os.path.join(out_dir, f"export_{timestamp}.json")
+
+          export_data = {
+              "channel": channel,
+              "extracted_at": timestamp,
+              "requested_count": count,
+              "actual_count": len(messages),
+              "messages": messages[:count],
+              "errors": errors
+          }
+
           with open(filepath, 'w', encoding='utf-8') as f:
-              json.dump(messages[:count], f, ensure_ascii=False, indent=2)
-          print(f"✅ {len(messages[:count])} پیام در {filepath} ذخیره شد.")
+              json.dump(export_data, f, ensure_ascii=False, indent=2)
+
+          print(f"✅ {len(messages)} پیام استخراج شد. خروجی: {filepath}")
+          if errors:
+              print(f"⚠️  خطاها: {errors}")
           PYEOF
 
-      - name: Upload debug screenshots & export folder
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: telegram-export-files
-          path: Telegram Export/
-          retention-days: 3
-
-      - name: Commit and push results to repo
-        if: always()
+      - name: Commit and push export
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add "Telegram Export/"
           if git diff --staged --quiet; then
-            echo "No changes to commit."
+            echo "No changes."
           else
-            git commit -m "📤 Export + screenshots for ${{ github.event.inputs.channel_name }}"
+            git commit -m "📤 Export for ${{ github.event.inputs.channel_name }}"
             git push
           fi
