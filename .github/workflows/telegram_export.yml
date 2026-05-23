@@ -1,4 +1,4 @@
-name: Telegram Channel Export (Fixed)
+name: Telegram Channel Export (Final)
 
 on:
   workflow_dispatch:
@@ -27,13 +27,11 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Playwright browser
-        uses: microsoft/playwright-github-action@v1
-        with:
-          browsers: 'chromium'
-
       - name: Install Python dependencies
-        run: pip install beautifulsoup4 playwright-stealth
+        run: pip install beautifulsoup4 playwright playwright-stealth
+
+      - name: Install Chromium browser for Playwright
+        run: python -m playwright install chromium --with-deps
 
       - name: Scrape Telegram channel
         id: scrape
@@ -54,6 +52,7 @@ jobs:
           out_dir = "Telegram Export"
           os.makedirs(out_dir, exist_ok=True)
 
+          screenshot_path = os.path.join(out_dir, "screenshot.png")   # فقط یک فایل ثابت
           messages = []
           error_occurred = False
 
@@ -72,16 +71,15 @@ jobs:
                       locale='en-US'
                   )
                   page = context.new_page()
-
-                  # مخفی‌سازی کامل برای رد نشدن توسط تلگرام
-                  stealth_sync(page)
+                  stealth_sync(page)   # مخفی‌سازی حرفه‌ای
 
                   print(f"🌐 رفتن به {url}")
                   page.goto(url, wait_until='domcontentloaded', timeout=30000)
                   page.wait_for_timeout(8000)
 
+                  # اگر صفحه پیش‌نمایش آمد، یک بار دیگر تلاش کن
                   if 'VIEW IN TELEGRAM' in page.content():
-                      print("⚠️ صفحه پیش‌نمایش. تلاش دوباره با user-agent جدید...")
+                      print("⚠️ صفحه پیش‌نمایش – تلاش دوباره با user-agent جدید...")
                       context.close()
                       context = browser.new_context(
                           user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -93,18 +91,18 @@ jobs:
                       page.goto(url, wait_until='domcontentloaded', timeout=30000)
                       page.wait_for_timeout(8000)
 
-                  page.screenshot(path=os.path.join(out_dir, "debug_initial.png"))
+                  # اسکرین‌شات اولیه (همیشه فقط همین یکی جایگزین می‌شود)
+                  page.screenshot(path=screenshot_path)
 
                   if 'VIEW IN TELEGRAM' in page.content():
-                      print("❌ هنوز صفحه پیش‌نمایش است.")
+                      print("❌ همچنان صفحه پیش‌نمایش – دسترسی ناموفق.")
                       error_occurred = True
                   else:
                       try:
                           page.wait_for_selector('.tgme_widget_message_wrap', timeout=15000)
-                          print("✅ پیام‌ها لود شدند.")
+                          print("✅ پیام‌ها بارگذاری شدند.")
                       except TimeoutError:
-                          print("⏰ پیام‌ها ظاهر نشدند.")
-                          page.screenshot(path=os.path.join(out_dir, "debug_error.png"))
+                          print("⏰ پیام‌ها پیدا نشدند.")
                           error_occurred = True
 
                   if not error_occurred:
@@ -158,20 +156,18 @@ jobs:
                               page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
                               time.sleep(3)
 
-                      page.screenshot(path=os.path.join(out_dir, "debug_final.png"))
-                      print(f"📸 {len(messages)} پیام استخراج شد.")
+                      # اسکرین‌شات نهایی (جایگزین تصویر قبلی)
+                      page.screenshot(path=screenshot_path, full_page=True)
+                      print(f"📸 اسکرین‌شات در {screenshot_path} ذخیره شد. {len(messages)} پیام استخراج شد.")
 
                   browser.close()
 
           except Exception as e:
               print(f"🔥 خطا: {e}")
               error_occurred = True
-              try:
-                  if 'page' in locals():
-                      page.screenshot(path=os.path.join(out_dir, "debug_unexpected.png"))
-              except:
-                  pass
+              # اگر خطایی رخ داد، اسکرین‌شات فعلی را نگه دار (همان که بالاتر گرفته شد)
 
+          # ذخیره داده‌ها
           timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
           filepath = os.path.join(out_dir, f"export_{timestamp}.json")
           export_data = {
@@ -185,7 +181,7 @@ jobs:
           with open(filepath, 'w', encoding='utf-8') as f:
               json.dump(export_data, f, ensure_ascii=False, indent=2)
 
-          print(f"✅ فایل ذخیره شد: {filepath}")
+          print(f"✅ فایل JSON ذخیره شد: {filepath}")
           if error_occurred:
               sys.exit(1)
           PYEOF
