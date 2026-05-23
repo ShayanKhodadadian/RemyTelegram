@@ -23,8 +23,15 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install Chrome
+        run: |
+          wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y google-chrome-stable
+
       - name: Install npm packages
-        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
+        run: npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth axios
 
       - name: Create script
         run: |
@@ -33,23 +40,26 @@ jobs:
           const StealthPlugin = require("puppeteer-extra-plugin-stealth");
           const fs = require("fs");
           const path = require("path");
+          const axios = require("axios");
           const { execSync } = require("child_process");
 
           puppeteer.use(StealthPlugin());
 
+          const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
           (async () => {
             const telegramLink = process.argv[2];
-            if (!telegramLink) throw new Error("No telegram link");
+            if (!telegramLink) throw new Error("No telegram link provided");
 
             const downloadsDir = "Downloads";
             if (!fs.existsSync(downloadsDir)) {
               fs.mkdirSync(downloadsDir, { recursive: true });
             }
 
-            console.log("Launching stealth browser");
+            console.log("Launching stealth browser...");
             const browser = await puppeteer.launch({
               headless: true,
-              executablePath: '/usr/bin/google-chrome',
+              executablePath: "/usr/bin/google-chrome",
               args: [
                 "--no-sandbox",
                 "--disable-setuid-sandbox",
@@ -58,7 +68,6 @@ jobs:
               ]
             });
 
-            let directPage;
             try {
               const page = await browser.newPage();
               await page.setUserAgent(
@@ -68,152 +77,195 @@ jobs:
               page.setDefaultTimeout(90000);
 
               await page.evaluateOnNewDocument(() => {
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
+                Object.defineProperty(navigator, "webdriver", { get: () => false });
               });
 
-              console.log("Opening site");
+              // ── Step 1: Open the downloader site ──────────────────────────────
+              console.log("Opening telegramdownloader.net...");
               await page.goto("https://telegramdownloader.net/", {
                 waitUntil: "domcontentloaded",
                 timeout: 90000
               });
-              await new Promise(r => setTimeout(r, 10000));
+              await sleep(8000);
 
-              console.log("Current URL:", page.url());
               console.log("Page title:", await page.title());
 
-              console.log("Waiting for textbox");
-              await page.waitForSelector("#ts-telegram-link", { timeout: 90000 });
-
+              // ── Step 2: Enter the Telegram link ───────────────────────────────
+              console.log("Entering Telegram link...");
+              await page.waitForSelector("#ts-telegram-link", { timeout: 30000 });
               await page.focus("#ts-telegram-link");
-              await page.evaluate(() => document.querySelector("#ts-telegram-link").value = "");
-              await page.type("#ts-telegram-link", telegramLink, { delay: 100 });
+              await page.evaluate(() => {
+                document.querySelector("#ts-telegram-link").value = "";
+              });
+              await page.type("#ts-telegram-link", telegramLink, { delay: 80 });
 
-              console.log("Click Download");
+              // ── Step 3: Click Download and wait for the result link ────────────
+              console.log("Clicking Download button...");
               await page.click("#ts-download-btn");
 
+              let intermediateHref = null;
               try {
-                await page.waitForSelector(".ts-download-link-button", { timeout: 30000 });
-              } catch (btnError) {
-                console.log("Did not find direct link button in 30s. Checking for error message...");
-                const errorText = await page.evaluate(() => {
-                  const el = document.querySelector('.alert-danger, .error-message, .ts-error');
-                  return el ? el.innerText : null;
+                await page.waitForSelector(".ts-download-link-button", { timeout: 45000 });
+                intermediateHref = await page.$eval(".ts-download-link-button", el => el.href);
+                console.log("Intermediate download page:", intermediateHref);
+              } catch (e) {
+                // Capture debug screenshot and surface any error message
+                const errText = await page.evaluate(() => {
+                  const el = document.querySelector(".alert-danger, .error-message, .ts-error");
+                  return el ? el.innerText.trim() : null;
                 });
-                if (errorText) {
-                  console.log("Site error message:", errorText);
-                  throw new Error(`Site returned error: ${errorText}`);
-                } else {
-                  await page.screenshot({ path: path.join(downloadsDir, "debug.png"), fullPage: true });
-                  throw new Error("Direct link button did not appear, no error message found. See debug.png");
-                }
+                await page.screenshot({
+                  path: path.join(downloadsDir, "debug.png"),
+                  fullPage: true
+                });
+                throw new Error(
+                  errText
+                    ? `Site returned error: ${errText}`
+                    : "Download link button did not appear. See debug.png."
+                );
               }
 
-              const href = await page.$eval(".ts-download-link-button", el => el.href);
-              console.log("Direct page:", href);
+              // ── Step 4: Open the intermediate page that has #download-btn ─────
+              console.log("Opening intermediate download page...");
+              const dlPage = await browser.newPage();
+              await dlPage.setUserAgent(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+              );
+              dlPage.setDefaultTimeout(60000);
 
-              directPage = await browser.newPage();
-              await directPage.goto(href, { waitUntil: "networkidle2" });
-              console.log("Waiting timer...");
-              await directPage.waitForSelector("#download-btn", { timeout: 30000 });
-              await new Promise(r => setTimeout(r, 16000));
+              await dlPage.goto(intermediateHref, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-              // --- تنظیم مسیر دانلود با CDP ---
-              const cdpSession = await directPage.target().createCDPSession();
-              await cdpSession.send("Page.setDownloadBehavior", {
-                behavior: "allow",
-                downloadPath: path.resolve(downloadsDir)
+              // Wait for the green "Download File" button (#download-btn) to appear
+              console.log("Waiting for #download-btn to appear...");
+              await dlPage.waitForSelector("#download-btn", { timeout: 60000 });
+
+              // Some sites enable the button after a countdown — wait for it to become clickable
+              console.log("Waiting for countdown / button activation (16 s)...");
+              await sleep(16000);
+
+              // Re-query after the wait in case the href is set dynamically
+              const downloadURL = await dlPage.$eval("#download-btn", el => el.href);
+              if (!downloadURL || downloadURL === "about:blank" || downloadURL === "") {
+                await dlPage.screenshot({
+                  path: path.join(downloadsDir, "debug.png"),
+                  fullPage: true
+                });
+                throw new Error(
+                  "#download-btn found but href is empty. The countdown may not have finished. See debug.png."
+                );
+              }
+              console.log("Final download URL:", downloadURL);
+
+              // Grab cookies from the intermediate page to pass along with the download request
+              const cookies = await dlPage.cookies();
+              const cookieString = cookies.map(c => `${c.name}=${c.value}`).join("; ");
+
+              // ── Step 5: Download the file via axios ───────────────────────────
+              console.log("Downloading file...");
+              const response = await axios({
+                method: "GET",
+                url: downloadURL,
+                responseType: "stream",
+                timeout: 0, // no timeout for large files
+                headers: {
+                  "User-Agent":
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                  Cookie: cookieString,
+                  Referer: intermediateHref
+                }
               });
 
-              // لیست فایل‌های فعلی برای تشخیص فایل جدید
-              const beforeFiles = fs.readdirSync(downloadsDir);
-
-              console.log("Clicking final download button");
-              await directPage.click("#download-btn");
-
-              // منتظر اتمام دانلود (حداکثر ۳۰ ثانیه)
-              console.log("Waiting for download to complete...");
-              let downloadedFile = null;
-              for (let i = 0; i < 30; i++) {
-                await new Promise(r => setTimeout(r, 1000));
-                const afterFiles = fs.readdirSync(downloadsDir);
-                const newFiles = afterFiles.filter(
-                  f => !beforeFiles.includes(f) && !f.endsWith(".crdownload")
-                );
-                if (newFiles.length > 0) {
-                  downloadedFile = newFiles[0];
-                  break;
-                }
+              // Determine filename from Content-Disposition or URL
+              let filename = "telegram_file";
+              const cd = response.headers["content-disposition"];
+              if (cd) {
+                const m = cd.match(/filename[^;=\n]*=(['"]?)([^\n'"]+)\1/);
+                if (m && m[2]) filename = m[2].trim();
+              } else {
+                try {
+                  filename = decodeURIComponent(path.basename(new URL(downloadURL).pathname));
+                } catch (_) {}
               }
 
-              if (!downloadedFile) {
-                throw new Error("Download did not complete within 30 seconds");
-              }
+              const tempPath = path.join(downloadsDir, "__temp_" + filename);
+              console.log(`Saving to: ${tempPath}`);
 
-              const filePath = path.join(downloadsDir, downloadedFile);
-              console.log("Downloaded file:", filePath);
+              await new Promise((resolve, reject) => {
+                const writer = fs.createWriteStream(tempPath);
+                response.data.pipe(writer);
+                writer.on("finish", resolve);
+                writer.on("error", reject);
+              });
 
-              // تقسیم فایل اگر بزرگتر از ۴۵ مگابایت باشد
-              const size = fs.statSync(filePath).size;
+              const size = fs.statSync(tempPath).size;
+              console.log(`Downloaded ${size} bytes`);
+
+              // ── Step 6: Split if > 45 MB, otherwise just rename ───────────────
               const limit = 45 * 1024 * 1024; // 45 MB
+              const finalPath = path.join(downloadsDir, filename);
 
               if (size > limit) {
-                console.log("Splitting...");
-                execSync(`split -b 45M -d "${filePath}" "${downloadsDir}/${downloadedFile}.part_"`);
-                // حذف فایل اصلی
-                fs.unlinkSync(filePath);
+                console.log("File exceeds 45 MB — splitting...");
+                execSync(
+                  `split -b 45M -d "${tempPath}" "${finalPath}.part_"`
+                );
+                fs.unlinkSync(tempPath);
+                console.log("Split complete.");
               } else {
-                console.log("File size is below limit, no split needed.");
+                fs.renameSync(tempPath, finalPath);
+                console.log(`File saved as: ${finalPath}`);
               }
 
-              console.log("Done");
-              await browser.close();
-
-            } catch (e) {
-              console.error("Error occurred:", e);
-
+              console.log("All done!");
+            } catch (err) {
+              console.error("Fatal error:", err.message || err);
+              // Try to capture a screenshot from whichever page is active
               try {
-                if (browser && browser.isConnected()) {
-                  const pages = await browser.pages();
-                  const currentPage = pages.length > 0 ? pages[pages.length - 1] : null;
-                  if (currentPage) {
-                    const screenshotPath = path.join(downloadsDir, "debug.png");
-                    await currentPage.screenshot({ path: screenshotPath, fullPage: true });
-                    console.log(`Screenshot saved to ${screenshotPath}`);
-                  }
+                const pages = await browser.pages();
+                if (pages.length > 0) {
+                  const last = pages[pages.length - 1];
+                  await last.screenshot({
+                    path: path.join(downloadsDir, "debug.png"),
+                    fullPage: true
+                  });
+                  console.log("Debug screenshot saved.");
                 }
-              } catch (ssError) {
-                console.error("Could not capture screenshot:", ssError);
-              }
-
+              } catch (_) {}
               await browser.close();
               process.exit(1);
             }
+
+            await browser.close();
           })();
           EOF
 
       - name: Run script
+        continue-on-error: true
         env:
           LINK: ${{ github.event.inputs.telegram_link }}
         run: node download.js "$LINK"
 
-      - name: Commit files (including debug screenshot if any)
+      - name: Commit downloaded files
         if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -d Downloads ]; then
+          if [ -d Downloads ] && [ "$(ls -A Downloads)" ]; then
             git add Downloads/
-          fi
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
+            if git diff --cached --quiet; then
+              echo "Nothing new to commit."
+            else
+              git commit -m "Add downloaded Telegram file(s)"
+              git push
+            fi
           else
-            git commit -m "Add Telegram files and/or debug screenshot"
-            git push
+            echo "Downloads folder is empty — nothing to commit."
           fi
 
-      - name: Upload debug artifact (backup)
+      - name: Upload debug screenshot (if any)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: debug
+          name: debug-screenshot
           path: Downloads/debug.png
+          if-no-files-found: ignore
