@@ -33,7 +33,7 @@ jobs:
           const path = require('path');
           const { execSync } = require('child_process');
 
-          // تابع کمکی: پیدا کردن و کلیک روی یک المنت با XPath (با استفاده از ::-p-xpath)
+          // تابع کلیک روی المنت با XPath
           async function clickXPath(page, xpath, timeoutMs = 10000) {
             const start = Date.now();
             while (Date.now() - start < timeoutMs) {
@@ -70,44 +70,50 @@ jobs:
                 waitUntil: 'networkidle0',
                 timeout: 30000
               });
-
-              // صبر برای بارگذاری کامل
-              await new Promise(r => setTimeout(r, 3000));
+              await new Promise(r => setTimeout(r, 3000)); // صبر برای لود کامل
               await page.screenshot({ path: 'page_loaded.png' });
-              console.log('Screenshot saved: page_loaded.png');
 
-              // پر کردن فیلد ورودی با ID اختصاصی
-              console.log('Waiting for input field #ts-telegram-link...');
+              // پر کردن فیلد ورودی
+              console.log('Filling input field...');
               await page.waitForSelector('#ts-telegram-link', { visible: true, timeout: 15000 });
               await page.type('#ts-telegram-link', telegramLink);
               console.log('Link pasted.');
 
-              // زدن Enter برای ارسال فرم (بدون نیاز به کلیک دکمه)
-              console.log('Pressing Enter...');
-              await page.keyboard.press('Enter');
+              // کلیک روی دکمهٔ Download (چند انتخاب‌گر مختلف)
+              console.log('Clicking the Download button...');
+              const downloadClicked = await clickXPath(page, [
+                "//button[contains(text(), 'Download')]",
+                "//input[@type='submit'][contains(@value, 'Download')]",
+                "//a[contains(text(), 'Download')]",
+                "//button[contains(@class, 'download')]",
+                "//form//button",
+                "//form//input[@type='submit']"
+              ], 15000);
 
-              // صبر برای ظاهر شدن لینک «Get Direct Download Link»
+              if (!downloadClicked) {
+                await page.screenshot({ path: 'download_button_not_found.png' });
+                throw new Error('Download button not found.');
+              }
+
+              // صبر برای ظاهر شدن دکمهٔ Get Direct Download Link
               console.log('Waiting for "Get Direct Download Link"...');
               const getDirectXPath = "//a[contains(text(), 'Get Direct Download Link')]";
-              const clicked = await clickXPath(page, getDirectXPath, 20000);
-              if (!clicked) {
+              const getDirectClicked = await clickXPath(page, getDirectXPath, 25000);
+              if (!getDirectClicked) {
                 await page.screenshot({ path: 'getdirect_not_found.png' });
                 throw new Error('"Get Direct Download Link" button not found.');
               }
 
-              // صبر برای پیمایش به صفحه‌ی تایمر
-              await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => {
-                console.log('Navigation might have been instant.');
-              });
+              // حالا به صفحهٔ تایمر می‌رویم
+              await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 15000 }).catch(() => {});
               console.log('Current URL:', page.url());
 
-              // صبر برای ظاهر شدن دکمه‌ی نهایی «Download File» با ID=download-btn
-              console.log('Waiting for final download button (#download-btn)...');
+              // صبر برای دکمهٔ نهایی #download-btn
+              console.log('Waiting for final download button...');
               await page.waitForSelector('#download-btn', { visible: true, timeout: 25000 });
-              console.log('Final button found, clicking...');
               await page.click('#download-btn');
 
-              // صبر برای انتقال به دامنه‌ی tg.telegramdownloader.net
+              // انتقال به لینک دانلود مستقیم
               await page.waitForNavigation({ waitUntil: 'networkidle0', timeout: 30000 }).catch(() => {});
               const downloadUrl = page.url();
               console.log('Final download URL:', downloadUrl);
@@ -151,7 +157,7 @@ jobs:
 
               // مدیریت حجم و تقسیم
               const stats = fs.statSync(filename);
-              const maxSize = 45 * 1024 * 1024; // 45MB
+              const maxSize = 45 * 1024 * 1024;
               const downloadsDir = 'Downloads';
               if (!fs.existsSync(downloadsDir)) fs.mkdirSync(downloadsDir, { recursive: true });
 
