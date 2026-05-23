@@ -23,15 +23,6 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install system dependencies (for Puppeteer)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libnss3 libnspr4 libatk1.0-0 libatk-bridge2.0-0 \
-            libcups2 libdrm2 libxkbcommon0 libxcomposite1 \
-            libxdamage1 libxfixes3 libxrandr2 libgbm1 \
-            libpango-1.0-0 libcairo2 libasound2
-
       - name: Install npm packages
         run: npm install puppeteer axios
 
@@ -53,9 +44,10 @@ jobs:
               fs.mkdirSync(downloadsDir, { recursive: true });
             }
 
-            console.log("Launching browser");
+            console.log("Launching browser (using system Chrome)");
             const browser = await puppeteer.launch({
               headless: true,
+              executablePath: '/usr/bin/google-chrome',   // ← کروم پیش‌فرض گیت‌هاب
               args: ["--no-sandbox", "--disable-setuid-sandbox"]
             });
 
@@ -82,7 +74,6 @@ jobs:
 
               await page.focus("#ts-telegram-link");
               await page.evaluate(() => { document.querySelector("#ts-telegram-link").value = ""; });
-              // حذف تایپ تکراری – فقط یک بار تایپ می‌کنیم
               await page.type("#ts-telegram-link", telegramLink, { delay: 50 });
 
               console.log("Click Download");
@@ -102,7 +93,6 @@ jobs:
               const downloadURL = await directPage.$eval("#download-btn", el => el.href);
               console.log("Final URL:", downloadURL);
 
-              // دریافت کوکی‌ها برای دانلود
               const cookies = await directPage.cookies();
               const cookieString = cookies.map(c => `${c.name}=${c.value}`).join("; ");
               const referer = href;
@@ -153,7 +143,6 @@ jobs:
             } catch (e) {
               console.error("Error occurred:", e);
 
-              // تلاش برای گرفتن اسکرین‌شات از وضعیت فعلی مرورگر
               try {
                 if (browser && browser.isConnected()) {
                   const pages = await browser.pages();
@@ -175,17 +164,22 @@ jobs:
           EOF
 
       - name: Run script
-        continue-on-error: true   # اجازه می‌ده مرحله‌های بعد حتی در صورت خطا اجرا شوند
+        continue-on-error: true
         env:
           LINK: ${{ github.event.inputs.telegram_link }}
         run: node download.js "$LINK"
 
       - name: Commit files (including debug screenshot if any)
-        if: always()    # همیشه اجرا شود، چه موفقیت چه خطا
+        if: always()
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Downloads/
+
+          # فقط اگر پوشه وجود دارد، آن را اضافه کن
+          if [ -d Downloads ]; then
+            git add Downloads/
+          fi
+
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
