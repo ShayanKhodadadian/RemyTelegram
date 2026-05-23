@@ -60,22 +60,63 @@ jobs:
 
           const page=await browser.newPage();
 
-          await page.setViewport({
-            width:1280,
-            height:900
-          });
-
-          await page.goto(
-            "https://telegramdownloader.net/",
-            {
-              waitUntil:"networkidle2"
-            }
+          await page.setUserAgent(
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
           );
 
-          console.log("Entering link");
+          await page.setViewport({
+          width:1366,
+          height:768
+          });
 
-          await page.waitForSelector(
-            "#ts-telegram-link"
+          page.setDefaultTimeout(90000);
+
+          console.log("Opening site");
+
+          await page.goto(
+          "https://telegramdownloader.net/",
+          {
+          waitUntil:"domcontentloaded",
+          timeout:90000
+          }
+          );
+
+          await new Promise(
+          r=>setTimeout(r,10000)
+          );
+
+          console.log("Current URL:");
+          console.log(page.url());
+
+          console.log("Page title:");
+          console.log(await page.title());
+
+          console.log("Waiting for textbox");
+
+          await page.waitForFunction(() => {
+          return document.querySelector(
+          '#ts-telegram-link'
+          )!==null
+          },{
+          timeout:90000
+          });
+
+          await page.focus(
+          "#ts-telegram-link"
+          );
+
+          await page.evaluate(()=>{
+          document.querySelector(
+          "#ts-telegram-link"
+          ).value="";
+          });
+
+          await page.type(
+          "#ts-telegram-link",
+          telegramLink,
+          {
+          delay:50
+          }
           );
 
           await page.type(
@@ -85,9 +126,11 @@ jobs:
 
           console.log("Click Download");
 
-          await page.click(
-            "#ts-download-btn"
-          );
+          await page.evaluate(()=>{
+          document.querySelector(
+          "#ts-download-btn"
+          ).click();
+          });
 
           console.log(
             "Waiting for direct link button"
@@ -299,3 +342,10 @@ jobs:
             git commit -m "Add Telegram files"
             git push
           fi
+
+      - name: Upload debug screenshot
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: debug
+          path: debug.png
