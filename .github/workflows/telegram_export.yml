@@ -1,4 +1,4 @@
-name: Telegram Channel Export
+name: Telegram Channel Export (Debug)
 
 on:
   workflow_dispatch:
@@ -12,7 +12,6 @@ on:
         required: true
         default: '20'
 
-# مجوز نوشتن برای push کردن تغییرات
 permissions:
   contents: write
 
@@ -33,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: pip install requests beautifulsoup4
 
-      - name: Run Telegram scraper
+      - name: Run Telegram scraper (with debug logs)
         env:
           CHANNEL: ${{ github.event.inputs.channel_name }}
           COUNT: ${{ github.event.inputs.message_count }}
@@ -52,17 +51,40 @@ jobs:
           messages = []
           current_url = base_url
 
+          print(f"🎯 Trying to fetch {count} messages from @{channel}")
+          print(f"🌐 Starting URL: {current_url}\n")
+
           while len(messages) < count:
               resp = requests.get(current_url, headers=headers, timeout=15)
+              print(f"📡 Request to: {current_url}")
+              print(f"   Status Code: {resp.status_code}")
+
               if resp.status_code != 200:
-                  print(f"Failed to fetch page: {resp.status_code}")
+                  print(f"   ❌ Failed! Response content (first 200 chars): {resp.text[:200]}")
                   break
 
+              # نمایش بخشی از کد HTML برای عیب‌یابی
+              print(f"   📄 Page size: {len(resp.text)} chars")
+              # فقط 300 کاراکتر اول
+              snippet = resp.text[:300].replace('\n', ' ')
+              print(f"   📝 HTML snippet: {snippet} ...")
+
               soup = BeautifulSoup(resp.text, 'html.parser')
+
+              # روش مقاوم‌تر: پیدا کردن هر div که data-post شبیه channel/123 دارد
               msg_containers = soup.select('.tgme_widget_message_wrap')
+              fallback_containers = soup.select('div[data-post]')
+              
+              # اگر با کلاس اصلی چیزی پیدا نشد، از روش fallback استفاده کن
+              if not msg_containers and fallback_containers:
+                  print("   ⚠️ Standard class not found, using generic data-post selector.")
+                  # فیلتر آنهایی که حاوی "/" هستند
+                  msg_containers = [div for div in fallback_containers if '/' in div.get('data-post', '')]
+              
+              print(f"   📦 Found {len(msg_containers)} potential message containers")
 
               if not msg_containers:
-                  print("No messages found on page.")
+                  print("   ❌ No message containers found. Stopping.")
                   break
 
               for container in msg_containers:
@@ -82,12 +104,18 @@ jobs:
                   file_info = None
                   doc_wrap = container.select_one('.tgme_widget_message_document_wrap')
                   if doc_wrap:
+                      # برخی نسخه‌ها لینک مستقیم داخل doc_wrap است، برخی دیگر در یک <a> کناری
                       file_link = doc_wrap.get('href')
+                      if not file_link:
+                          # شاید لینک داخل یک تگ a باشد
+                          a_tag = doc_wrap.find('a')
+                          if a_tag:
+                              file_link = a_tag.get('href')
                       title_el = container.select_one('.tgme_widget_message_document_title')
                       file_name = title_el.get_text(strip=True) if title_el else "unknown_file"
                       file_info = {
                           "file_name": file_name,
-                          "download_link": file_link
+                          "download_link": file_link or "not found"
                       }
 
                   # لینک خود پیام
@@ -101,14 +129,20 @@ jobs:
                   })
 
               # رفتن به صفحه‌ی قدیمی‌تر
-              last_msg = msg_containers[-1]
-              last_id = last_msg.get('data-post', '').split('/')[-1]
-              if not last_id:
+              if msg_containers:
+                  last_msg = msg_containers[-1]
+                  last_id = last_msg.get('data-post', '').split('/')[-1]
+                  if last_id:
+                      current_url = f"{base_url}?before={last_id}"
+                  else:
+                      break
+              else:
                   break
-              current_url = f"{base_url}?before={last_id}"
-              time.sleep(1)  # یک ثانیه مکث برای رعایت ادب
+
+              time.sleep(1.5)  # کمی بیشتر برای احتیاط
 
           messages = messages[:count]
+          print(f"\n✅ Total messages collected: {len(messages)}")
 
           # ساختن پوشه و فایل خروجی
           out_dir = "Telegram Export"
@@ -121,7 +155,15 @@ jobs:
           with open(filepath, 'w', encoding='utf-8') as f:
               json.dump(messages, f, ensure_ascii=False, indent=2)
 
-          print(f"✅ {len(messages)} پیام با موفقیت در {filepath} ذخیره شد.")
+          print(f"📁 Saved to {filepath}")
+
+          # اگر پیام‌ها خالی هستند، فایل لاگ جداگانه‌ای هم ذخیره کن
+          if not messages:
+              debug_file = os.path.join(out_dir, "debug_empty_response.txt")
+              with open(debug_file, 'w', encoding='utf-8') as dbg:
+                  dbg.write(f"URL: {base_url}\nResponse status: {resp.status_code}\n")
+                  dbg.write(f"Response text (first 1000 chars):\n{resp.text[:1000]}")
+              print(f"🐞 Debug info saved to {debug_file}")
           PYEOF
 
       - name: Commit and push results
@@ -129,4 +171,4 @@ jobs:
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add "Telegram Export/"
-          git diff --staged --quiet || (git commit -m "📤 Export Telegram messages for ${{ github.event.inputs.channel_name }}" && git push)
+          git diff --staged --quiet || (git commit -m "📤 Export + debug info for ${{ github.event.inputs.channel_name }}" && git push)
