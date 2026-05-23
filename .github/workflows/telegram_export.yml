@@ -40,7 +40,7 @@ jobs:
           COUNT: ${{ github.event.inputs.message_count }}
         run: |
           python << 'PYEOF'
-          import os, sys, json, datetime, time
+          import os, sys, json, datetime, time, traceback
           from playwright.sync_api import sync_playwright, TimeoutError
           from playwright_stealth import stealth_sync
           from bs4 import BeautifulSoup
@@ -52,9 +52,15 @@ jobs:
           out_dir = "Telegram Export"
           os.makedirs(out_dir, exist_ok=True)
 
-          screenshot_path = os.path.join(out_dir, "screenshot.png")   # فقط یک فایل ثابت
+          # مسیرهای ثابت برای اسکرین‌شات‌ها
+          screenshot_initial = os.path.join(out_dir, "screenshot_initial.png")
+          screenshot_final   = os.path.join(out_dir, "screenshot_final.png")
+          screenshot_error   = os.path.join(out_dir, "screenshot_error.png")
+
           messages = []
           error_occurred = False
+          page = None
+          browser = None
 
           try:
               with sync_playwright() as p:
@@ -71,15 +77,20 @@ jobs:
                       locale='en-US'
                   )
                   page = context.new_page()
-                  stealth_sync(page)   # مخفی‌سازی حرفه‌ای
+                  stealth_sync(page)
 
                   print(f"🌐 رفتن به {url}")
                   page.goto(url, wait_until='domcontentloaded', timeout=30000)
                   page.wait_for_timeout(8000)
 
-                  # اگر صفحه پیش‌نمایش آمد، یک بار دیگر تلاش کن
+                  # اسکرین‌شات اولیه – همیشه ذخیره شود
+                  page.screenshot(path=screenshot_initial)
+                  print(f"📸 اسکرین‌شات اولیه در {screenshot_initial} ذخیره شد.")
+
+                  # اگر صفحه پیش‌نمایش آمد، دوباره تلاش کن
                   if 'VIEW IN TELEGRAM' in page.content():
                       print("⚠️ صفحه پیش‌نمایش – تلاش دوباره با user-agent جدید...")
+                      page.screenshot(path=screenshot_error)  # ذخیره وضعیت پیش‌نمایش
                       context.close()
                       context = browser.new_context(
                           user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -90,12 +101,12 @@ jobs:
                       stealth_sync(page)
                       page.goto(url, wait_until='domcontentloaded', timeout=30000)
                       page.wait_for_timeout(8000)
-
-                  # اسکرین‌شات اولیه (همیشه فقط همین یکی جایگزین می‌شود)
-                  page.screenshot(path=screenshot_path)
+                      # اسکرین‌شات بعد از تلاش مجدد
+                      page.screenshot(path=screenshot_initial)  # بازنویسی اسکرین‌شات اولیه
 
                   if 'VIEW IN TELEGRAM' in page.content():
                       print("❌ همچنان صفحه پیش‌نمایش – دسترسی ناموفق.")
+                      page.screenshot(path=screenshot_error)
                       error_occurred = True
                   else:
                       try:
@@ -103,6 +114,7 @@ jobs:
                           print("✅ پیام‌ها بارگذاری شدند.")
                       except TimeoutError:
                           print("⏰ پیام‌ها پیدا نشدند.")
+                          page.screenshot(path=screenshot_error)
                           error_occurred = True
 
                   if not error_occurred:
@@ -156,16 +168,24 @@ jobs:
                               page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
                               time.sleep(3)
 
-                      # اسکرین‌شات نهایی (جایگزین تصویر قبلی)
-                      page.screenshot(path=screenshot_path, full_page=True)
-                      print(f"📸 اسکرین‌شات در {screenshot_path} ذخیره شد. {len(messages)} پیام استخراج شد.")
+                      # اسکرین‌شات نهایی (تمام‌صفحه)
+                      page.screenshot(path=screenshot_final, full_page=True)
+                      print(f"📸 اسکرین‌شات نهایی در {screenshot_final} ذخیره شد. {len(messages)} پیام استخراج شد.")
 
-                  browser.close()
+                  if browser:
+                      browser.close()
 
           except Exception as e:
               print(f"🔥 خطا: {e}")
+              traceback.print_exc()
               error_occurred = True
-              # اگر خطایی رخ داد، اسکرین‌شات فعلی را نگه دار (همان که بالاتر گرفته شد)
+              # سعی کن از صفحه فعلی اسکرین‌شات بگیری (اگر page هنوز زنده باشه)
+              try:
+                  if page:
+                      page.screenshot(path=screenshot_error)
+                      print(f"⚠️ اسکرین‌شات خطا در {screenshot_error} ذخیره شد.")
+              except:
+                  print("نتوانستیم اسکرین‌شات خطا بگیریم.")
 
           # ذخیره داده‌ها
           timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
