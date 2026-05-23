@@ -1,0 +1,10 @@
+{
+  "channel": "DeutschMahroo",
+  "extracted_at": "2026-05-23_18-45-14",
+  "requested_count": 20,
+  "actual_count": 0,
+  "messages": [],
+  "errors": [
+    "No message containers found. HTML structure changed?"
+  ]
+}
