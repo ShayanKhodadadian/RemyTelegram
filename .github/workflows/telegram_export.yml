@@ -27,14 +27,13 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install Playwright (browsers + dependencies)
+      - name: Install Playwright browser
         uses: microsoft/playwright@v1
         with:
           browsers: 'chromium'
 
-      - name: Install Python packages
-        run: |
-          pip install beautifulsoup4 playwright-stealth
+      - name: Install Python dependencies
+        run: pip install beautifulsoup4 playwright-stealth
 
       - name: Scrape Telegram channel
         id: scrape
@@ -74,18 +73,16 @@ jobs:
                   )
                   page = context.new_page()
 
-                  # اعمال تنظیمات مخفی‌سازی با playwright-stealth
+                  # مخفی‌سازی کامل
                   stealth_sync(page)
 
                   print(f"🌐 رفتن به {url}")
                   page.goto(url, wait_until='domcontentloaded', timeout=30000)
-                  # صبر برای بارگذاری کامل جاوااسکریپت (کمی بیشتر)
                   page.wait_for_timeout(8000)
 
-                  # اگر هنوز پیش‌نمایش نمایش داده می‌شود، دوباره امتحان کن
+                  # اگر باز هم صفحه پیش‌نمایش آمد، یک بار دیگر با user-agent جدید تلاش کن
                   if 'VIEW IN TELEGRAM' in page.content():
-                      print("⚠️  صفحه پیش‌نمایش. شاید نیاز به کوکی یا user-agent جدید باشد.")
-                      # بارگذاری مجدد با user-agent جدید
+                      print("⚠️ صفحه پیش‌نمایش تشخیص داده شد. تلاش مجدد...")
                       context.close()
                       context = browser.new_context(
                           user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -101,14 +98,14 @@ jobs:
                   page.screenshot(path=os.path.join(out_dir, "debug_initial.png"))
 
                   if 'VIEW IN TELEGRAM' in page.content():
-                      print("❌ هنوز هم صفحه پیش‌نمایش است. تلگرام دسترسی را مسدود کرده.")
+                      print("❌ همچنان صفحه پیش‌نمایش است. تلگرام مسدود کرده.")
                       error_occurred = True
                   else:
                       try:
                           page.wait_for_selector('.tgme_widget_message_wrap', timeout=15000)
-                          print("✅ پیام‌ها لود شدند.")
+                          print("✅ پیام‌ها پیدا شدند.")
                       except TimeoutError:
-                          print("⏰ پیام‌ها ظاهر نشدند.")
+                          print("⏰ پیام‌ها بارگذاری نشدند.")
                           page.screenshot(path=os.path.join(out_dir, "debug_error.png"))
                           error_occurred = True
 
@@ -160,12 +157,11 @@ jobs:
                           previous_count = len(messages)
 
                           if len(messages) < count:
-                              # اسکرول به پایین صفحه با جاوااسکریپت
                               page.evaluate('window.scrollTo(0, document.body.scrollHeight)')
                               time.sleep(3)
 
                       page.screenshot(path=os.path.join(out_dir, "debug_final.png"))
-                      print(f"📸 اسکرین‌شات نهایی گرفته شد.")
+                      print(f"📸 اسکرین‌شات نهایی گرفته شد. {len(messages)} پیام استخراج شد.")
 
                   browser.close()
 
@@ -178,7 +174,7 @@ jobs:
               except:
                   pass
 
-          # ذخیره خروجی (چه خطا چه موفق)
+          # ذخیره خروجی
           timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
           filepath = os.path.join(out_dir, f"export_{timestamp}.json")
           export_data = {
@@ -204,7 +200,7 @@ jobs:
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
           git add "Telegram Export/"
           if git diff --staged --quiet; then
-            echo "No changes."
+            echo "No changes to commit."
           else
             git commit -m "📤 Export for ${{ github.event.inputs.channel_name }}"
             git push
